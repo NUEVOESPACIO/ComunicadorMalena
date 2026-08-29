@@ -10,6 +10,7 @@ import android.graphics.drawable.GradientDrawable;
 import android.net.Uri;
 import android.os.*;
 import android.util.LruCache;
+import android.util.TypedValue;
 import android.text.SpannableStringBuilder;
 import android.text.Spanned;
 import android.text.style.ImageSpan;
@@ -126,11 +127,31 @@ public class MainActivity extends Activity {
     }
 
     private void agregarTecladoYCandidatos() {
+        lista.addView(botonPlayFrase());
         lista.addView(tecladoPredictivo(catalogoBuscable));
         if (!filtroTeclado.isEmpty()) {
             int candidato = 0;
             for (String archivo : coincidenciasTeclado()) lista.addView(filaCandidato(archivo, candidato++));
         }
+    }
+
+    /** PLAY a todo el ancho, entre pictos elegidos y teclado. */
+    private View botonPlayFrase() {
+        Button play = tecla("", TECLA_NORMAL, v -> enviar());
+        play.setEnabled(true); play.setAlpha(1f);
+        Drawable iconoPlay = getResources().getDrawable(android.R.drawable.ic_media_play, getTheme()).mutate();
+        iconoPlay.setTint(0xff263238);
+        int ladoIcono = dp(14);
+        iconoPlay.setBounds(0, 0, ladoIcono, ladoIcono);
+        SpannableStringBuilder etiquetaPlay = new SpannableStringBuilder("PLAY ");
+        int inicioIcono = etiquetaPlay.length();
+        etiquetaPlay.append('\uFFFC');
+        etiquetaPlay.setSpan(new ImageSpan(iconoPlay, ImageSpan.ALIGN_CENTER), inicioIcono, etiquetaPlay.length(), Spanned.SPAN_EXCLUSIVE_EXCLUSIVE);
+        play.setText(etiquetaPlay);
+        LinearLayout.LayoutParams params = new LinearLayout.LayoutParams(-1, dp(40));
+        params.setMargins(0, dp(3), 0, dp(3));
+        play.setLayoutParams(params);
+        return play;
     }
     private void mostrarFrases() {
         palabras=false; actualizarTabs(); lista.removeAllViews();
@@ -140,6 +161,19 @@ public class MainActivity extends Activity {
     private void actualizarTabs() { tabPalabras.setEnabled(!palabras); tabFrases.setEnabled(palabras); tabPalabras.setAlpha(palabras?1:.72f); tabFrases.setAlpha(palabras?.72f:1); tabPalabras.setBackground(fondoSolapa(palabras)); tabFrases.setBackground(fondoSolapa(!palabras)); salir.setVisibility(palabras ? View.GONE : View.VISIBLE); }
     private View filaPalabra(PhraseRecord.Item item, int indice) {
         LinearLayout fila=nuevaFila(); fila.setBackground(fondoPalabra(indice, true));
+        // Número de orden arriba a la izquierda (~1/4 de la altura de la tarjeta).
+        int altoTarjeta = dp(70) + dp(12);
+        int altoNumero = altoTarjeta / 4;
+        int anchoNumero = dp(22);
+        TextView numero = new TextView(this);
+        numero.setText(String.valueOf(indice + 1));
+        numero.setTextColor(0xff263238);
+        numero.setTypeface(Typeface.DEFAULT_BOLD);
+        numero.setGravity(Gravity.CENTER);
+        numero.setTextSize(TypedValue.COMPLEX_UNIT_PX, altoNumero * .78f);
+        LinearLayout.LayoutParams numParams = fijo(anchoNumero, altoNumero, 0);
+        numParams.gravity = Gravity.TOP;
+        fila.addView(numero, numParams);
         FrameLayout icono = new FrameLayout(this); ImageView imagen=imagen(item.archivo); icono.addView(imagen,new FrameLayout.LayoutParams(-1,-1));
         View raya=new View(this); raya.setBackgroundColor(0xccb00020); raya.setVisibility(item.negado?View.VISIBLE:View.GONE); FrameLayout.LayoutParams pr=new FrameLayout.LayoutParams(-1,dp(5),Gravity.CENTER);pr.setMargins(dp(5),0,dp(5),0);icono.addView(raya,pr);
         icono.setContentDescription((item.negado ? "Afirmar " : "Negar ") + nombre(item.archivo));
@@ -266,9 +300,17 @@ public class MainActivity extends Activity {
         ejecutar(items,()->{fraseElegida=null;mostrarPalabras();});
     }
     private void ejecutarFrase(PhraseRecord frase) {
-        frases.remove(frase); frases.add(0, frase);
+        // Sale de Frases y queda en Palabras para reejecutar o editar (reemplaza el borrador actual).
+        frases.remove(frase);
         PhraseStore.guardar(this,frases); guardarRespaldo();
-        ejecutar(copiar(frase.items),()->{fraseElegida=null;mostrarFrases();});
+        List<PhraseRecord.Item> items = copiar(frase.items);
+        ejecutar(items, () -> {
+            fraseElegida = null;
+            borrador.clear();
+            borrador.addAll(copiar(items));
+            filtroTeclado = "";
+            mostrarPalabras();
+        });
     }
     private void ejecutar(List<PhraseRecord.Item> items, Runnable fin) {
         contenido.setVisibility(View.GONE); FrameLayout raiz=(FrameLayout)contenido.getParent(); raiz.setClipChildren(false); raiz.setClipToPadding(false); LinearLayout tren=new LinearLayout(this);tren.setGravity(Gravity.CENTER_VERTICAL);tren.setClipChildren(false);tren.setClipToPadding(false);for(PhraseRecord.Item i:items)tren.addView(picto(i,false,dp(185),dp(3),true)); int anchoTren=items.size()*(dp(185)+dp(6)); raiz.addView(tren,new FrameLayout.LayoutParams(anchoTren,dp(210),Gravity.CENTER_VERTICAL));
@@ -452,22 +494,10 @@ public class MainActivity extends Activity {
         panelParams.setMargins(0, dp(5), 0, dp(5)); panel.setLayoutParams(panelParams);
 
         LinearLayout controles = new LinearLayout(this); controles.setGravity(Gravity.CENTER);
-        Button liberar = tecla("Soltar", TECLA_NORMAL, lleno ? null : v -> liberarFiltro());
+        Button liberar = tecla("Soltar todas", TECLA_NORMAL, lleno ? null : v -> liberarFiltro());
         boolean soltarActivo = !lleno && !filtroTeclado.isEmpty();
         liberar.setEnabled(soltarActivo); liberar.setAlpha(soltarActivo ? 1f : .35f);
         controles.addView(liberar, peso(1, dp(28), dp(1)));
-        Button play = tecla("", TECLA_NORMAL, v -> enviar());
-        play.setEnabled(true); play.setAlpha(1f);
-        Drawable iconoPlay = getResources().getDrawable(android.R.drawable.ic_media_play, getTheme()).mutate();
-        iconoPlay.setTint(0xff263238);
-        int ladoIcono = dp(14);
-        iconoPlay.setBounds(0, 0, ladoIcono, ladoIcono);
-        SpannableStringBuilder etiquetaPlay = new SpannableStringBuilder("PLAY ");
-        int inicioIcono = etiquetaPlay.length();
-        etiquetaPlay.append('\uFFFC');
-        etiquetaPlay.setSpan(new ImageSpan(iconoPlay, ImageSpan.ALIGN_CENTER), inicioIcono, etiquetaPlay.length(), Spanned.SPAN_EXCLUSIVE_EXCLUSIVE);
-        play.setText(etiquetaPlay);
-        controles.addView(play, peso(1, dp(28), dp(1)));
         panel.addView(controles);
 
         Set<Character> iniciales = caracteresIniciales(disponibles);
@@ -638,7 +668,13 @@ public class MainActivity extends Activity {
         String cached = nombresCache.get(archivo);
         return cached != null ? cached : calcularNombre(archivo);
     }
-    private String calcularNombre(String archivo){int p=archivo.lastIndexOf('.');return(p>0?archivo.substring(0,p):archivo).replace('_',' ').toUpperCase(Locale.ROOT);}
+    private String calcularNombre(String archivo){
+        int p=archivo.lastIndexOf('.');
+        String base=(p>0?archivo.substring(0,p):archivo).replace('_',' ');
+        // Oculta sufijos tipo (1), (2), etc. en el texto visible.
+        base=base.replaceAll("\\s*\\(\\d+\\)","").trim();
+        return base.toUpperCase(Locale.ROOT);
+    }
     private ImageButton papelera(String d){ImageButton b=new ImageButton(this);b.setImageResource(android.R.drawable.ic_menu_delete);b.setContentDescription(d);b.setBackgroundColor(Color.TRANSPARENT);return b;}
     private GradientDrawable fondo(){GradientDrawable f=new GradientDrawable();f.setColor(Color.WHITE);f.setCornerRadius(dp(10));f.setStroke(dp(1),0x22000000);return f;}
     private GradientDrawable fondoPalabra(int indice, boolean seleccionada){GradientDrawable f=new GradientDrawable();int color=COLORES_PALABRAS[indice%COLORES_PALABRAS.length];if(seleccionada)color=oscurecer(color,.86f);f.setColor(color);f.setCornerRadius(dp(12));f.setStroke(dp(seleccionada?2:1),seleccionada?0xff55616a:0x4437464f);return f;}
