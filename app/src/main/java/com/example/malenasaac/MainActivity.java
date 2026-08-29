@@ -13,6 +13,9 @@ import android.util.LruCache;
 import android.text.SpannableStringBuilder;
 import android.text.Spanned;
 import android.text.style.ImageSpan;
+import android.text.style.RelativeSizeSpan;
+import android.text.style.StyleSpan;
+import android.text.style.UnderlineSpan;
 import android.view.*;
 import android.widget.*;
 import java.io.*;
@@ -30,6 +33,10 @@ public class MainActivity extends Activity {
     private static final String DIR = "pictos";
     private static final int[] COLORES_PALABRAS = {0xffe3f4e8, 0xffe1f0fa, 0xfffff5c9, 0xffffe3ee};
     private static final int[] COLORES_FRASES = {0xffeee8fb, 0xffffeadb, 0xffdef3f1, 0xffe7edf9};
+    /** Estilos visuales de teclas del teclado predictivo. */
+    private static final int TECLA_NORMAL = 0;
+    private static final int TECLA_PULSADA = 1;
+    private static final int TECLA_ULTIMA = 2;
     private LinearLayout contenido, lista;
     private ScrollView scrollLista;
     private Button tabPalabras, tabFrases;
@@ -126,7 +133,7 @@ public class MainActivity extends Activity {
         }
     }
     private void mostrarFrases() {
-        palabras=false; ordenarFrases(); actualizarTabs(); lista.removeAllViews();
+        palabras=false; actualizarTabs(); lista.removeAllViews();
         if(frases.isEmpty()) { TextView v=new TextView(this); v.setText("Todavía no hay frases guardadas."); v.setTextSize(18); v.setGravity(Gravity.CENTER); v.setPadding(0,dp(35),0,0); lista.addView(v); }
         int indice=0; for(PhraseRecord f:frases) lista.addView(filaFrase(f, indice++));
     }
@@ -138,18 +145,29 @@ public class MainActivity extends Activity {
         icono.setContentDescription((item.negado ? "Afirmar " : "Negar ") + nombre(item.archivo));
         icono.setOnClickListener(v->{item.negado=!item.negado;raya.setVisibility(item.negado?View.VISIBLE:View.GONE);icono.setContentDescription((item.negado ? "Afirmar " : "Negar ") + nombre(item.archivo));});
         fila.addView(icono,fijo(dp(70),dp(70),dp(4)));
-        TextView nombre=new TextView(this); nombre.setText(nombre(item.archivo)); nombre.setTextSize(20); nombre.setGravity(Gravity.CENTER_VERTICAL); fila.addView(nombre,peso(1,-1,dp(4)));
+        TextView nombre=new TextView(this); nombre.setText(nombre(item.archivo)); nombre.setTextSize(20f * 1.12f); nombre.setTypeface(nombre.getTypeface(), Typeface.BOLD); nombre.setGravity(Gravity.CENTER_VERTICAL); fila.addView(nombre,peso(1,-1,dp(4)));
         ImageButton papelera=papelera("Quitar una selección"); papelera.setOnClickListener(v->quitar(item)); fila.addView(papelera,fijo(dp(54),dp(54),0)); return fila;
     }
     private View filaCandidato(String archivo, int indice) {
         LinearLayout fila = nuevaFila(); fila.setBackground(fondoPalabra(indice, false));
         ImageView icono = imagen(archivo); fila.addView(icono, fijo(dp(70), dp(70), dp(4)));
-        TextView etiqueta = new TextView(this); etiqueta.setText(nombre(archivo)); etiqueta.setTextSize(20); etiqueta.setGravity(Gravity.CENTER_VERTICAL);
+        TextView etiqueta = new TextView(this); etiqueta.setText(nombreConPrefijoResaltado(archivo)); etiqueta.setTextSize(20); etiqueta.setGravity(Gravity.CENTER_VERTICAL);
         fila.addView(etiqueta, peso(1, -1, dp(4)));
         View.OnClickListener elegir = v -> agregar(archivo);
         fila.setOnClickListener(elegir); icono.setOnClickListener(elegir); etiqueta.setOnClickListener(elegir);
         fila.setContentDescription("Agregar " + nombre(archivo));
         return fila;
+    }
+
+    /** Resalta en negrita las letras ya tipadas en el teclado. */
+    private CharSequence nombreConPrefijoResaltado(String archivo) {
+        String texto = nombre(archivo);
+        int largo = Math.min(filtroTeclado.length(), texto.length());
+        if (largo <= 0) return texto;
+        SpannableStringBuilder etiqueta = new SpannableStringBuilder(texto);
+        etiqueta.setSpan(new StyleSpan(Typeface.BOLD), 0, largo, Spanned.SPAN_EXCLUSIVE_EXCLUSIVE);
+        etiqueta.setSpan(new RelativeSizeSpan(1.12f), 0, largo, Spanned.SPAN_EXCLUSIVE_EXCLUSIVE);
+        return etiqueta;
     }
     private View filaFrase(PhraseRecord frase, int indice) {
         boolean seleccionada = frase == fraseElegida;
@@ -242,12 +260,14 @@ public class MainActivity extends Activity {
 
     private void enviar() {
         List<PhraseRecord.Item> items=copiar(borrador); if(items.isEmpty()){Toast.makeText(this,"Seleccioná al menos un pictograma.",Toast.LENGTH_SHORT).show();return;}
-        frases.add(new PhraseRecord(items,1)); borrador.clear();
+        // Se guarda arriba (última ejecución) y el borrador se conserva para seguir editando.
+        frases.add(0, new PhraseRecord(items));
         PhraseStore.guardar(this,frases); guardarRespaldo();
-        ejecutar(items,()->{fraseElegida=null;mostrarFrases();});
+        ejecutar(items,()->{fraseElegida=null;mostrarPalabras();});
     }
     private void ejecutarFrase(PhraseRecord frase) {
-        frase.reproducciones++; PhraseStore.guardar(this,frases); guardarRespaldo();
+        frases.remove(frase); frases.add(0, frase);
+        PhraseStore.guardar(this,frases); guardarRespaldo();
         ejecutar(copiar(frase.items),()->{fraseElegida=null;mostrarFrases();});
     }
     private void ejecutar(List<PhraseRecord.Item> items, Runnable fin) {
@@ -305,8 +325,6 @@ public class MainActivity extends Activity {
 
     private float getTouchSlop(){return ViewConfiguration.get(this).getScaledTouchSlop();}
     private void confirmar(PhraseRecord frase){new AlertDialog.Builder(this).setTitle("Eliminar frase").setMessage("¿Seguro que querés borrar esta frase?").setNegativeButton("Cancelar",null).setPositiveButton("Eliminar",(d,w)->{frases.remove(frase);PhraseStore.guardar(this,frases);guardarRespaldo();if(fraseElegida==frase)fraseElegida=null;mostrarFrases();}).show();}
-
-    private void ordenarFrases() { Collections.sort(frases, (a, b) -> Integer.compare(b.reproducciones, a.reproducciones)); }
 
     private void ofrecerRestauracion() {
         new AlertDialog.Builder(this).setTitle("¿Restaurar frases guardadas?")
@@ -434,11 +452,11 @@ public class MainActivity extends Activity {
         panelParams.setMargins(0, dp(5), 0, dp(5)); panel.setLayoutParams(panelParams);
 
         LinearLayout controles = new LinearLayout(this); controles.setGravity(Gravity.CENTER);
-        Button liberar = tecla("Soltar", false, lleno ? null : v -> liberarFiltro());
+        Button liberar = tecla("Soltar", TECLA_NORMAL, lleno ? null : v -> liberarFiltro());
         boolean soltarActivo = !lleno && !filtroTeclado.isEmpty();
         liberar.setEnabled(soltarActivo); liberar.setAlpha(soltarActivo ? 1f : .35f);
         controles.addView(liberar, peso(1, dp(28), dp(1)));
-        Button play = tecla("", false, v -> enviar());
+        Button play = tecla("", TECLA_NORMAL, v -> enviar());
         play.setEnabled(true); play.setAlpha(1f);
         Drawable iconoPlay = getResources().getDrawable(android.R.drawable.ic_media_play, getTheme()).mutate();
         iconoPlay.setTint(0xff263238);
@@ -456,44 +474,64 @@ public class MainActivity extends Activity {
         if (lleno) {
             agregarFilaTeclado(panel, "QWERTYUIOP", Collections.emptySet(), iniciales, false);
             agregarFilaTeclado(panel, "ASDFGHJKLÑ", Collections.emptySet(), iniciales, false);
-            agregarFilaTeclado(panel, "ZXCVBNM", Collections.emptySet(), iniciales, false);
+            agregarFilaTeclado(panel, "ZXCVBNM ", Collections.emptySet(), iniciales, false);
         } else {
             Set<Character> siguientes = siguientesCaracteres(disponibles);
             agregarFilaTeclado(panel, "QWERTYUIOP", siguientes, iniciales, true);
             agregarFilaTeclado(panel, "ASDFGHJKLÑ", siguientes, iniciales, true);
-            agregarFilaTeclado(panel, "ZXCVBNM", siguientes, iniciales, true);
+            agregarFilaTeclado(panel, "ZXCVBNM ", siguientes, iniciales, true);
         }
         return panel;
     }
 
     private void liberarFiltro() { filtroTeclado=""; actualizarTrasTecla(); }
 
+    /** Espacio se muestra como "_" para que la tecla sea visible. */
+    private String etiquetaTecla(char letra) { return letra == ' ' ? "_" : String.valueOf(letra); }
+
+    private void borrarUltimaTecla() {
+        if (filtroTeclado.isEmpty()) return;
+        filtroTeclado = filtroTeclado.substring(0, filtroTeclado.length() - 1);
+        actualizarTrasTecla();
+    }
+
     private void agregarFilaTeclado(LinearLayout panel, String letras, Set<Character> siguientes, Set<Character> iniciales, boolean habilitado) {
         LinearLayout fila = new LinearLayout(this); fila.setGravity(Gravity.CENTER);
+        char ultima = filtroTeclado.isEmpty() ? 0 : filtroTeclado.charAt(filtroTeclado.length() - 1);
         for (int i=0; i<letras.length(); i++) {
             char letra = letras.charAt(i);
+            String etiqueta = etiquetaTecla(letra);
             if (!habilitado) {
-                Button inactiva = tecla(String.valueOf(letra), false, null);
+                Button inactiva = tecla(etiqueta, TECLA_NORMAL, null);
                 inactiva.setEnabled(false); inactiva.setAlpha(.35f);
                 fila.addView(inactiva, peso(1, dp(31), dp(1)));
                 continue;
             }
             int seleccionadas = cantidadDeLetra(letra);
             boolean disponible = siguientes.contains(letra);
-            boolean enTecladoOriginal = iniciales.contains(letra);
+            // Espacio siempre forma parte del teclado (pictos con varias palabras).
+            boolean enTecladoOriginal = iniciales.contains(letra) || letra == ' ';
             // El teclado original (iniciales) se mantiene: si no hay próxima
             // ocurrencia la tecla se inhibe, no desaparece. Excepción: si la
             // letra ya fue pulsada y sigue siendo válida, se agrega una copia activa.
             if (!enTecladoOriginal && !disponible && seleccionadas == 0) continue;
             for (int copia=0; copia<seleccionadas; copia++) {
-                Button marcada = tecla(String.valueOf(letra), true, null);
-                marcada.setEnabled(false); fila.addView(marcada, peso(1, dp(31), dp(1)));
+                // Solo la copia que representa la última letra tipada se puede deshacer.
+                boolean esUltima = letra == ultima && copia == seleccionadas - 1;
+                if (esUltima) {
+                    Button deshacer = tecla(etiqueta, TECLA_ULTIMA, v -> borrarUltimaTecla());
+                    deshacer.setContentDescription("Borrar última letra");
+                    fila.addView(deshacer, peso(1, dp(31), dp(1)));
+                } else {
+                    Button marcada = tecla(etiqueta, TECLA_PULSADA, null);
+                    marcada.setEnabled(false); fila.addView(marcada, peso(1, dp(31), dp(1)));
+                }
             }
             if (disponible) {
-                Button opcion = tecla(String.valueOf(letra), false, v -> { filtroTeclado += letra; actualizarTrasTecla(); });
+                Button opcion = tecla(etiqueta, TECLA_NORMAL, v -> { filtroTeclado += letra; actualizarTrasTecla(); });
                 fila.addView(opcion, peso(1, dp(31), dp(1)));
             } else if (seleccionadas == 0) {
-                Button inactiva = tecla(String.valueOf(letra), false, null);
+                Button inactiva = tecla(etiqueta, TECLA_NORMAL, null);
                 inactiva.setEnabled(false); inactiva.setAlpha(.35f);
                 fila.addView(inactiva, peso(1, dp(31), dp(1)));
             }
@@ -533,10 +571,18 @@ public class MainActivity extends Activity {
         return r;
     }
 
-    private Button tecla(String texto, boolean pulsada, View.OnClickListener accion) {
-        Button boton = new Button(this); boton.setText(texto); boton.setTextSize(texto.length() == 1 ? 15 : 11); boton.setAllCaps(false);
-        boton.setTextColor(pulsada ? Color.WHITE : 0xff263238); boton.setPadding(0, 0, 0, 0); boton.setGravity(Gravity.CENTER);
-        boton.setBackground(fondoTecla(pulsada)); if (accion != null) boton.setOnClickListener(accion); return boton;
+    private Button tecla(String texto, int estilo, View.OnClickListener accion) {
+        Button boton = new Button(this);
+        if (estilo == TECLA_ULTIMA) {
+            SpannableStringBuilder etiqueta = new SpannableStringBuilder(texto);
+            etiqueta.setSpan(new UnderlineSpan(), 0, etiqueta.length(), Spanned.SPAN_EXCLUSIVE_EXCLUSIVE);
+            boton.setText(etiqueta);
+        } else boton.setText(texto);
+        boton.setTextSize(texto.length() == 1 ? 15 : 11); boton.setAllCaps(false);
+        boton.setTextColor(estilo == TECLA_NORMAL ? 0xff263238 : Color.WHITE);
+        boton.setPadding(0, 0, 0, 0); boton.setGravity(Gravity.CENTER);
+        boton.setBackground(fondoTecla(estilo == TECLA_ULTIMA ? TECLA_PULSADA : estilo));
+        if (accion != null) boton.setOnClickListener(accion); return boton;
     }
 
     private void agregarCadenaDeSugerencias(List<String> orden, List<String> disponibles, String anterior) {
@@ -600,7 +646,12 @@ public class MainActivity extends Activity {
     private GradientDrawable fondoFrase(int indice, boolean seleccionada){GradientDrawable f=new GradientDrawable();int color=COLORES_FRASES[indice%COLORES_FRASES.length];f.setColor(seleccionada?oscurecer(color,.72f):color);f.setCornerRadius(dp(16));f.setStroke(dp(seleccionada?3:1),seleccionada?0xff382060:0xff685c7a);return f;}
     private GradientDrawable bordePicto(){GradientDrawable f=new GradientDrawable();f.setColor(Color.WHITE);f.setCornerRadius(dp(10));f.setStroke(dp(2),Color.BLACK);return f;}
     private GradientDrawable fondoTeclado(){GradientDrawable f=new GradientDrawable();f.setColor(0xffedf3f7);f.setCornerRadius(dp(12));f.setStroke(dp(2),0xff718596);return f;}
-    private GradientDrawable fondoTecla(boolean pulsada){GradientDrawable f=new GradientDrawable();f.setColor(pulsada?0xff496f88:0xffffffff);f.setCornerRadius(dp(7));f.setStroke(dp(1),pulsada?0xff294b62:0xff91a5b4);return f;}
+    private GradientDrawable fondoTecla(int estilo){
+        GradientDrawable f=new GradientDrawable();
+        if (estilo == TECLA_PULSADA) { f.setColor(0xff496f88); f.setCornerRadius(dp(7)); f.setStroke(dp(1),0xff294b62); }
+        else { f.setColor(0xffffffff); f.setCornerRadius(dp(7)); f.setStroke(dp(1),0xff91a5b4); }
+        return f;
+    }
     private GradientDrawable fondoPanel(){GradientDrawable f=new GradientDrawable();f.setColor(0xffdfe8f0);f.setCornerRadius(dp(16));f.setStroke(dp(3),0xff718596);return f;}
     private GradientDrawable fondoSolapa(boolean activa){GradientDrawable f=new GradientDrawable();f.setColor(activa?0xffd5e9f7:0xffeef3f7);f.setCornerRadius(dp(14));f.setStroke(dp(activa?3:2),activa?0xff496f88:0xff718596);return f;}
     private LinearLayout.LayoutParams peso(float peso,int alto,int margen){LinearLayout.LayoutParams p=new LinearLayout.LayoutParams(0,alto,peso);p.setMargins(margen,0,margen,0);return p;}
