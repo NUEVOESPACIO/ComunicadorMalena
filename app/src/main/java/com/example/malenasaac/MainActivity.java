@@ -45,7 +45,6 @@ public class MainActivity extends Activity {
     private final List<String> pictos = new ArrayList<>();
     private final List<PhraseRecord> frases = new ArrayList<>();
     private final List<PhraseRecord.Item> borrador = new ArrayList<>();
-    private PhraseRecord fraseElegida;
     private boolean palabras = true;
     private int frasesDescartadasAlCargar;
     /** Prefijo elegido en el teclado predictivo de pictogramas. */
@@ -110,7 +109,7 @@ public class MainActivity extends Activity {
     private Button tab(String texto, View.OnClickListener accion) { Button b = new Button(this); b.setText(texto.toUpperCase(Locale.ROOT)); b.setTextSize(18); b.setTextColor(0xff263238); b.setAllCaps(false); b.setGravity(Gravity.CENTER); b.setOnClickListener(accion); return b; }
 
     private void mostrarPalabras() {
-        palabras=true; fraseElegida=null; actualizarTabs(); lista.removeAllViews();
+        palabras=true; actualizarTabs(); lista.removeAllViews();
         int indice=0;
         // Las tarjetas ya elegidas siempre se muestran primero, incluso si la misma se eligió más de una vez.
         for(PhraseRecord.Item item:borrador) lista.addView(filaPalabra(item, indice++));
@@ -204,11 +203,14 @@ public class MainActivity extends Activity {
         return etiqueta;
     }
     private View filaFrase(PhraseRecord frase, int indice) {
-        boolean seleccionada = frase == fraseElegida;
-        LinearLayout fila=nuevaFila(); fila.setBackground(fondoFrase(indice, seleccionada));
-        if (seleccionada) fila.setElevation(dp(7));
-        HorizontalScrollView h=new HorizontalScrollView(this); h.setHorizontalScrollBarEnabled(false); h.setFillViewport(true); LinearLayout iconos=new LinearLayout(this); iconos.setGravity(Gravity.CENTER_VERTICAL); h.addView(iconos); h.post(()->dibujarIconosDeFrase(iconos,h,frase)); View.OnClickListener elegir=v->{fraseElegida=frase;mostrarFrases();}; fila.setOnClickListener(elegir); h.setOnClickListener(elegir); iconos.setOnClickListener(elegir); fila.addView(h,peso(1,dp(82),0));
-        if (seleccionada) { ImageButton play = new ImageButton(this); play.setImageResource(android.R.drawable.ic_media_play); play.setContentDescription("Reproducir frase"); play.setBackgroundColor(Color.TRANSPARENT); play.setOnClickListener(v -> ejecutarFrase(frase)); fila.addView(play,fijo(dp(54),dp(54),0)); }
+        LinearLayout fila=nuevaFila(); fila.setBackground(fondoFrase(indice, false));
+        HorizontalScrollView h=new HorizontalScrollView(this); h.setHorizontalScrollBarEnabled(false); h.setFillViewport(true);
+        LinearLayout iconos=new LinearLayout(this); iconos.setGravity(Gravity.CENTER_VERTICAL); h.addView(iconos);
+        h.post(()->dibujarIconosDeFrase(iconos,h,frase));
+        fila.addView(h,peso(1,dp(82),0));
+        ImageButton play = new ImageButton(this); play.setImageResource(android.R.drawable.ic_media_play);
+        play.setContentDescription("Reproducir frase"); play.setBackgroundColor(Color.TRANSPARENT);
+        play.setOnClickListener(v -> ejecutarFrase(frase)); fila.addView(play,fijo(dp(54),dp(54),0));
         ImageButton borrar=papelera("Eliminar frase"); borrar.setOnClickListener(v->confirmar(frase)); fila.addView(borrar,fijo(dp(54),dp(54),0)); return fila;
     }
     private void dibujarIconosDeFrase(LinearLayout destino, View espacio, PhraseRecord frase) {
@@ -294,23 +296,43 @@ public class MainActivity extends Activity {
 
     private void enviar() {
         List<PhraseRecord.Item> items=copiar(borrador); if(items.isEmpty()){Toast.makeText(this,"Seleccioná al menos un pictograma.",Toast.LENGTH_SHORT).show();return;}
-        // Se guarda arriba (última ejecución) y el borrador se conserva para seguir editando.
-        frases.add(0, new PhraseRecord(items));
+        // Si ya está en Frases, solo pasa a ser la última ejecutada; si no, se agrega.
+        marcarUltimaEjecucion(items);
         PhraseStore.guardar(this,frases); guardarRespaldo();
-        ejecutar(items,()->{fraseElegida=null;mostrarPalabras();});
+        ejecutar(items,()->mostrarPalabras());
     }
     private void ejecutarFrase(PhraseRecord frase) {
-        // Sale de Frases y queda en Palabras para reejecutar o editar (reemplaza el borrador actual).
-        frases.remove(frase);
+        // Queda en Frases como última ejecutada y se carga en Palabras para editar/reejecutar.
+        frases.remove(frase); frases.add(0, frase);
         PhraseStore.guardar(this,frases); guardarRespaldo();
         List<PhraseRecord.Item> items = copiar(frase.items);
         ejecutar(items, () -> {
-            fraseElegida = null;
             borrador.clear();
             borrador.addAll(copiar(items));
             filtroTeclado = "";
             mostrarPalabras();
         });
+    }
+
+    /** Mueve la frase existente al tope o la agrega si es nueva. */
+    private void marcarUltimaEjecucion(List<PhraseRecord.Item> items) {
+        for (int i = 0; i < frases.size(); i++) {
+            if (mismosItems(frases.get(i).items, items)) {
+                PhraseRecord existente = frases.remove(i);
+                frases.add(0, existente);
+                return;
+            }
+        }
+        frases.add(0, new PhraseRecord(items));
+    }
+
+    private static boolean mismosItems(List<PhraseRecord.Item> a, List<PhraseRecord.Item> b) {
+        if (a.size() != b.size()) return false;
+        for (int i = 0; i < a.size(); i++) {
+            PhraseRecord.Item x = a.get(i), y = b.get(i);
+            if (!x.archivo.equals(y.archivo) || x.negado != y.negado) return false;
+        }
+        return true;
     }
     private void ejecutar(List<PhraseRecord.Item> items, Runnable fin) {
         contenido.setVisibility(View.GONE); FrameLayout raiz=(FrameLayout)contenido.getParent(); raiz.setClipChildren(false); raiz.setClipToPadding(false); LinearLayout tren=new LinearLayout(this);tren.setGravity(Gravity.CENTER_VERTICAL);tren.setClipChildren(false);tren.setClipToPadding(false);for(PhraseRecord.Item i:items)tren.addView(picto(i,false,dp(185),dp(3),true)); int anchoTren=items.size()*(dp(185)+dp(6)); raiz.addView(tren,new FrameLayout.LayoutParams(anchoTren,dp(210),Gravity.CENTER_VERTICAL));
@@ -366,7 +388,7 @@ public class MainActivity extends Activity {
     }
 
     private float getTouchSlop(){return ViewConfiguration.get(this).getScaledTouchSlop();}
-    private void confirmar(PhraseRecord frase){new AlertDialog.Builder(this).setTitle("Eliminar frase").setMessage("¿Seguro que querés borrar esta frase?").setNegativeButton("Cancelar",null).setPositiveButton("Eliminar",(d,w)->{frases.remove(frase);PhraseStore.guardar(this,frases);guardarRespaldo();if(fraseElegida==frase)fraseElegida=null;mostrarFrases();}).show();}
+    private void confirmar(PhraseRecord frase){new AlertDialog.Builder(this).setTitle("Eliminar frase").setMessage("¿Seguro que querés borrar esta frase?").setNegativeButton("Cancelar",null).setPositiveButton("Eliminar",(d,w)->{frases.remove(frase);PhraseStore.guardar(this,frases);guardarRespaldo();mostrarFrases();}).show();}
 
     private void ofrecerRestauracion() {
         new AlertDialog.Builder(this).setTitle("¿Restaurar frases guardadas?")
