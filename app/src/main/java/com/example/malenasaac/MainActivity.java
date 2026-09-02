@@ -6,9 +6,13 @@ import android.content.*;
 import android.content.pm.PackageManager;
 import android.graphics.*;
 import android.graphics.drawable.Drawable;
+import android.graphics.drawable.AnimationDrawable;
 import android.graphics.drawable.GradientDrawable;
 import android.net.Uri;
 import android.os.*;
+import android.speech.RecognitionListener;
+import android.speech.RecognizerIntent;
+import android.speech.SpeechRecognizer;
 import android.util.LruCache;
 import android.util.TypedValue;
 import android.text.SpannableStringBuilder;
@@ -31,6 +35,7 @@ public class MainActivity extends Activity {
     private static final int TAM_PICTO_REPRODUCCION = 512;
     private static final int ELEGIR_RESPALDO = 41;
     private static final int PERMISO_DESCARGAS = 42;
+    private static final int PERMISO_MICRO = 43;
     private static final String DIR = "pictos";
     private static final int[] COLORES_PALABRAS = {0xffe3f4e8, 0xffe1f0fa, 0xfffff5c9, 0xffffe3ee};
     private static final int[] COLORES_FRASES = {0xffeee8fb, 0xffffeadb, 0xffdef3f1, 0xffe7edf9};
@@ -55,6 +60,11 @@ public class MainActivity extends Activity {
     private final Map<String, String> nombresCache = new HashMap<>();
     /** Miniaturas decodificadas para evitar releer assets en cada tecla. */
     private LruCache<String, Bitmap> cacheMiniaturas;
+    private ImageButton botonMicro;
+    private SpeechRecognizer reconocedorVoz;
+    private boolean escuchandoVoz;
+    private boolean bloqueoUiAplicado;
+    private AnimationDrawable animacionMicro;
 
     @Override protected void onCreate(Bundle state) {
         super.onCreate(state); cargarDatos(); crearVista(); mostrarPalabras(); ocultarBarras();
@@ -65,6 +75,18 @@ public class MainActivity extends Activity {
         if (esInstalacionNueva() && frases.isEmpty()) contenido.post(this::ofrecerRestauracion);
     }
     @Override protected void onResume() { super.onResume(); ocultarBarras(); }
+    @Override protected void onPause() {
+        if (escuchandoVoz && reconocedorVoz != null) {
+            escuchandoVoz = false;
+            actualizarIconoMicro(false);
+            reconocedorVoz.cancel();
+        }
+        super.onPause();
+    }
+    @Override protected void onDestroy() {
+        if (reconocedorVoz != null) { reconocedorVoz.destroy(); reconocedorVoz = null; }
+        super.onDestroy();
+    }
     @Override public void onWindowFocusChanged(boolean foco) { super.onWindowFocusChanged(foco); if (foco) ocultarBarras(); }
 
     private void cargarDatos() {
@@ -100,7 +122,8 @@ public class MainActivity extends Activity {
         FrameLayout raiz = new FrameLayout(this); raiz.setBackgroundColor(0xfff7f8fa);
         contenido = new LinearLayout(this); contenido.setOrientation(LinearLayout.VERTICAL); raiz.addView(contenido, new FrameLayout.LayoutParams(-1,-1));
         LinearLayout tabs = new LinearLayout(this); tabs.setPadding(dp(10),dp(10),dp(10),dp(6));
-        tabPalabras = tab("Palabras", v -> mostrarPalabras()); tabFrases = tab("Frases", v -> mostrarFrases());
+        tabPalabras = tab("Palabras", v -> { if (!escuchandoVoz) mostrarPalabras(); });
+        tabFrases = tab("Frases", v -> { if (!escuchandoVoz) mostrarFrases(); });
         tabs.addView(tabPalabras, peso(1,-2,dp(4))); tabs.addView(tabFrases,peso(1,-2,dp(4)));
         salir = new ImageButton(this); salir.setImageResource(android.R.drawable.ic_menu_close_clear_cancel); salir.setContentDescription("Salir de la aplicación"); salir.setBackgroundColor(Color.TRANSPARENT); salir.setVisibility(View.GONE); salir.setOnClickListener(v -> finishAffinity()); tabs.addView(salir, fijo(dp(52),dp(52),0)); contenido.addView(tabs);
         scrollLista = new ScrollView(this); lista = new LinearLayout(this); lista.setOrientation(LinearLayout.VERTICAL); lista.setPadding(dp(10),dp(4),dp(10),dp(4)); scrollLista.addView(lista); contenido.addView(scrollLista, expandirEnVertical());
@@ -115,10 +138,13 @@ public class MainActivity extends Activity {
         for(PhraseRecord.Item item:borrador) lista.addView(filaPalabra(item, indice++));
         agregarTecladoYCandidatos();
         scrollLista.scrollTo(0, 0);
+        bloqueoUiAplicado = false;
+        actualizarModoEscucha();
     }
 
     /** Actualiza solo teclado y candidatos, sin reconstruir las tarjetas ya elegidas. */
     private void actualizarTrasTecla() {
+        if (escuchandoVoz) return;
         int indiceTeclado = borrador.size();
         while (lista.getChildCount() > indiceTeclado) lista.removeViewAt(indiceTeclado);
         agregarTecladoYCandidatos();
@@ -134,25 +160,231 @@ public class MainActivity extends Activity {
         }
     }
 
-    /** PLAY a todo el ancho, entre pictos elegidos y teclado. */
+    /** Micrófono + PLAY entre pictos elegidos y teclado. */
     private View botonPlayFrase() {
-        Button play = tecla("", TECLA_NORMAL, v -> enviar());
+        int altoBoton = dp(40);
+        LinearLayout fila = new LinearLayout(this);
+        fila.setOrientation(LinearLayout.HORIZONTAL);
+        fila.setGravity(Gravity.CENTER_VERTICAL);
+        LinearLayout.LayoutParams filaParams = new LinearLayout.LayoutParams(-1, altoBoton);
+        filaParams.setMargins(0, dp(3), 0, dp(3));
+        fila.setLayoutParams(filaParams);
+
+        botonMicro = new ImageButton(this);
+        botonMicro.setBackground(fondoTecla(TECLA_NORMAL));
+        botonMicro.setScaleType(ImageView.ScaleType.FIT_CENTER);
+        botonMicro.setPadding(dp(8), dp(8), dp(8), dp(8));
+        botonMicro.setOnClickListener(v -> alternarMicro());
+        actualizarIconoMicro(escuchandoVoz);
+        fila.addView(botonMicro, fijo(altoBoton, altoBoton, dp(4)));
+
+        Button play = tecla("", TECLA_NORMAL, v -> { if (!escuchandoVoz) enviar(); });
         play.setEnabled(true); play.setAlpha(1f);
+        int ladoIcono = dp(14);
         Drawable iconoPlay = getResources().getDrawable(android.R.drawable.ic_media_play, getTheme()).mutate();
         iconoPlay.setTint(0xff263238);
-        int ladoIcono = dp(14);
         iconoPlay.setBounds(0, 0, ladoIcono, ladoIcono);
         SpannableStringBuilder etiquetaPlay = new SpannableStringBuilder("PLAY ");
         int inicioIcono = etiquetaPlay.length();
         etiquetaPlay.append('\uFFFC');
         etiquetaPlay.setSpan(new ImageSpan(iconoPlay, ImageSpan.ALIGN_CENTER), inicioIcono, etiquetaPlay.length(), Spanned.SPAN_EXCLUSIVE_EXCLUSIVE);
         play.setText(etiquetaPlay);
-        LinearLayout.LayoutParams params = new LinearLayout.LayoutParams(-1, dp(40));
-        params.setMargins(0, dp(3), 0, dp(3));
-        play.setLayoutParams(params);
-        return play;
+        fila.addView(play, peso(1, altoBoton, 0));
+        return fila;
+    }
+
+    private void alternarMicro() {
+        if (escuchandoVoz) { detenerEscuchaYEnviar(); return; }
+        if (!SpeechRecognizer.isRecognitionAvailable(this)) {
+            Toast.makeText(this, "Reconocimiento de voz no disponible.", Toast.LENGTH_SHORT).show();
+            return;
+        }
+        if (checkSelfPermission(android.Manifest.permission.RECORD_AUDIO) != PackageManager.PERMISSION_GRANTED) {
+            requestPermissions(new String[]{android.Manifest.permission.RECORD_AUDIO}, PERMISO_MICRO);
+            return;
+        }
+        iniciarEscucha();
+    }
+
+    private void asegurarReconocedor() {
+        if (reconocedorVoz != null) return;
+        reconocedorVoz = SpeechRecognizer.createSpeechRecognizer(this);
+        reconocedorVoz.setRecognitionListener(new RecognitionListener() {
+            @Override public void onReadyForSpeech(Bundle params) { }
+            @Override public void onBeginningOfSpeech() { }
+            @Override public void onRmsChanged(float rmsdB) {
+                runOnUiThread(() -> {
+                    if (!escuchandoVoz || botonMicro == null) return;
+                    float pulso = Math.max(0f, rmsdB) / 12f;
+                    float escala = 1f + pulso * 0.18f;
+                    botonMicro.setScaleX(escala);
+                    botonMicro.setScaleY(escala);
+                });
+            }
+            @Override public void onBufferReceived(byte[] buffer) { }
+            @Override public void onEndOfSpeech() { }
+            @Override public void onPartialResults(Bundle partialResults) { }
+            @Override public void onEvent(int eventType, Bundle params) { }
+            @Override public void onError(int error) {
+                runOnUiThread(() -> {
+                    escuchandoVoz = false;
+                    actualizarIconoMicro(false);
+                });
+            }
+            @Override public void onResults(Bundle results) {
+                ArrayList<String> coincidencias = results.getStringArrayList(SpeechRecognizer.RESULTS_RECOGNITION);
+                String texto = (coincidencias != null && !coincidencias.isEmpty()) ? coincidencias.get(0) : null;
+                runOnUiThread(() -> {
+                    escuchandoVoz = false;
+                    actualizarIconoMicro(false);
+                    if (texto != null && !texto.isEmpty()) aplicarTextoEscuchado(texto);
+                    else {
+                        borrador.clear();
+                        filtroTeclado = "";
+                        mostrarPalabras();
+                    }
+                });
+            }
+        });
+    }
+
+    private void iniciarEscucha() {
+        asegurarReconocedor();
+        Intent intent = new Intent(RecognizerIntent.ACTION_RECOGNIZE_SPEECH);
+        intent.putExtra(RecognizerIntent.EXTRA_LANGUAGE_MODEL, RecognizerIntent.LANGUAGE_MODEL_FREE_FORM);
+        intent.putExtra(RecognizerIntent.EXTRA_LANGUAGE, "es-AR");
+        intent.putExtra(RecognizerIntent.EXTRA_MAX_RESULTS, 1);
+        escuchandoVoz = true;
+        actualizarIconoMicro(true);
+        reconocedorVoz.startListening(intent);
+    }
+
+    private void detenerEscuchaYEnviar() {
+        if (reconocedorVoz == null || !escuchandoVoz) return;
+        escuchandoVoz = false;
+        actualizarIconoMicro(false);
+        reconocedorVoz.stopListening();
+    }
+
+    private void actualizarIconoMicro(boolean escuchando) {
+        if (botonMicro != null) {
+            detenerAnimacionMicro();
+            botonMicro.setScaleX(1f);
+            botonMicro.setScaleY(1f);
+            if (escuchando) {
+                Drawable anim = getResources().getDrawable(R.drawable.anim_escucha, getTheme());
+                botonMicro.setImageDrawable(anim);
+                if (anim instanceof AnimationDrawable) {
+                    animacionMicro = (AnimationDrawable) anim;
+                    animacionMicro.start();
+                }
+                botonMicro.setBackground(fondoTecla(TECLA_PULSADA));
+                botonMicro.setContentDescription("Enviar audio");
+            } else {
+                Drawable icono = getResources().getDrawable(android.R.drawable.ic_btn_speak_now, getTheme()).mutate();
+                icono.setTint(0xff263238);
+                botonMicro.setImageDrawable(icono);
+                botonMicro.setBackground(fondoTecla(TECLA_NORMAL));
+                botonMicro.setContentDescription("Dictar con voz");
+            }
+        }
+        actualizarModoEscucha();
+    }
+
+    /** Inhibe el resto de la interfaz mientras el micrófono escucha. */
+    private void actualizarModoEscucha() {
+        boolean bloqueado = escuchandoVoz;
+        if (bloqueado) {
+            tabPalabras.setEnabled(false);
+            tabFrases.setEnabled(false);
+            tabPalabras.setAlpha(0.35f);
+            tabFrases.setAlpha(0.35f);
+            salir.setEnabled(false);
+            if (salir.getVisibility() == View.VISIBLE) salir.setAlpha(0.35f);
+        } else {
+            actualizarTabs();
+            salir.setEnabled(true);
+            if (salir.getVisibility() == View.VISIBLE) salir.setAlpha(1f);
+        }
+        if (scrollLista != null) scrollLista.setEnabled(!bloqueado);
+        if (!palabras || lista == null) return;
+        if (bloqueado) {
+            aplicarBloqueoLista(true);
+            bloqueoUiAplicado = true;
+        } else if (bloqueoUiAplicado) {
+            bloqueoUiAplicado = false;
+            restaurarInteraccionPalabras();
+        }
+    }
+
+    private void aplicarBloqueoLista(boolean bloqueado) {
+        int indicePlay = borrador.size();
+        for (int i = 0; i < lista.getChildCount(); i++) {
+            View hijo = lista.getChildAt(i);
+            if (i < indicePlay) {
+                inhibirVista(hijo, bloqueado);
+            } else if (i == indicePlay && hijo instanceof ViewGroup) {
+                ViewGroup fila = (ViewGroup) hijo;
+                for (int j = 0; j < fila.getChildCount(); j++) {
+                    View hijoFila = fila.getChildAt(j);
+                    if (hijoFila == botonMicro) continue;
+                    inhibirVista(hijoFila, bloqueado);
+                }
+            } else {
+                inhibirVista(hijo, bloqueado);
+            }
+        }
+    }
+
+    private void inhibirVista(View vista, boolean bloqueado) {
+        vista.setEnabled(!bloqueado);
+        vista.setAlpha(bloqueado ? 0.35f : 1f);
+        if (vista instanceof ViewGroup) {
+            ViewGroup grupo = (ViewGroup) vista;
+            for (int i = 0; i < grupo.getChildCount(); i++) inhibirVista(grupo.getChildAt(i), bloqueado);
+        }
+    }
+
+    private void restaurarInteraccionPalabras() {
+        int indiceTeclado = borrador.size();
+        for (int i = 0; i < indiceTeclado && i < lista.getChildCount(); i++) {
+            View hijo = lista.getChildAt(i);
+            hijo.setEnabled(true);
+            hijo.setAlpha(1f);
+            if (hijo instanceof ViewGroup) habilitarVista((ViewGroup) hijo);
+        }
+        while (lista.getChildCount() > indiceTeclado) lista.removeViewAt(indiceTeclado);
+        agregarTecladoYCandidatos();
+    }
+
+    private void habilitarVista(ViewGroup grupo) {
+        for (int i = 0; i < grupo.getChildCount(); i++) {
+            View hijo = grupo.getChildAt(i);
+            hijo.setEnabled(true);
+            hijo.setAlpha(1f);
+            if (hijo instanceof ViewGroup) habilitarVista((ViewGroup) hijo);
+        }
+    }
+
+    private void detenerAnimacionMicro() {
+        if (animacionMicro != null) {
+            animacionMicro.stop();
+            animacionMicro = null;
+        }
+    }
+
+    private void aplicarTextoEscuchado(String texto) {
+        borrador.clear();
+        List<CoincidenciaPicto> encontrados = AlgoritmoPictosFrase.coincidencias(texto, catalogoBuscable, this::nombre);
+        for (CoincidenciaPicto coincidencia : encontrados) {
+            if (borrador.size() >= MAX_PICTOS) break;
+            borrador.add(new PhraseRecord.Item(coincidencia.archivo, coincidencia.negado));
+        }
+        filtroTeclado = "";
+        mostrarPalabras();
     }
     private void mostrarFrases() {
+        if (escuchandoVoz) return;
         palabras=false; actualizarTabs(); lista.removeAllViews();
         if(frases.isEmpty()) { TextView v=new TextView(this); v.setText("Todavía no hay frases guardadas."); v.setTextSize(18); v.setGravity(Gravity.CENTER); v.setPadding(0,dp(35),0,0); lista.addView(v); }
         int indice=0; for(PhraseRecord f:frases) lista.addView(filaFrase(f, indice++));
@@ -223,11 +455,12 @@ public class MainActivity extends Activity {
     }
     private LinearLayout nuevaFila() { LinearLayout f=new LinearLayout(this); f.setGravity(Gravity.CENTER_VERTICAL); f.setPadding(dp(8),dp(6),dp(8),dp(6)); f.setBackground(fondo()); LinearLayout.LayoutParams p=new LinearLayout.LayoutParams(-1,-2);p.setMargins(0,dp(3),0,dp(3));f.setLayoutParams(p);return f; }
     private void agregar(String archivo) {
+        if (escuchandoVoz) return;
         if(borrador.size()==MAX_PICTOS){Toast.makeText(this,"Podés seleccionar hasta 7 pictogramas.",Toast.LENGTH_SHORT).show();return;}
         borrador.add(new PhraseRecord.Item(archivo,false)); filtroTeclado=""; mostrarPalabras();
         scrollLista.scrollTo(0, 0);
     }
-    private void quitar(PhraseRecord.Item item) { borrador.remove(item); filtroTeclado=""; mostrarPalabras(); }
+    private void quitar(PhraseRecord.Item item) { if (escuchandoVoz) return; borrador.remove(item); filtroTeclado=""; mostrarPalabras(); }
     private View picto(PhraseRecord.Item item, boolean editable, int lado) { return picto(item, editable, lado, dp(3), false); }
     private View picto(PhraseRecord.Item item, boolean editable, int lado, int margen) { return picto(item, editable, lado, margen, false); }
     private View picto(PhraseRecord.Item item, boolean editable, int lado, int margen, boolean altaResolucion) {
@@ -295,6 +528,7 @@ public class MainActivity extends Activity {
     }
 
     private void enviar() {
+        if (escuchandoVoz) return;
         List<PhraseRecord.Item> items=copiar(borrador); if(items.isEmpty()){Toast.makeText(this,"Seleccioná al menos un pictograma.",Toast.LENGTH_SHORT).show();return;}
         // Si ya está en Frases, solo pasa a ser la última ejecutada; si no, se agrega.
         marcarUltimaEjecucion(items);
@@ -448,7 +682,15 @@ public class MainActivity extends Activity {
         new Thread(() -> { try { BackupStore.guardar(this, json); } catch (IOException ignored) { } }).start();
     }
 
-    @Override public void onRequestPermissionsResult(int codigo, String[] permisos, int[] resultados) { super.onRequestPermissionsResult(codigo, permisos, resultados); if (codigo == PERMISO_DESCARGAS && resultados.length > 0 && resultados[0] == PackageManager.PERMISSION_GRANTED) guardarRespaldo(); }
+    @Override public void onRequestPermissionsResult(int codigo, String[] permisos, int[] resultados) {
+        super.onRequestPermissionsResult(codigo, permisos, resultados);
+        if (resultados.length == 0) return;
+        if (codigo == PERMISO_DESCARGAS && resultados[0] == PackageManager.PERMISSION_GRANTED) guardarRespaldo();
+        if (codigo == PERMISO_MICRO) {
+            if (resultados[0] == PackageManager.PERMISSION_GRANTED) iniciarEscucha();
+            else Toast.makeText(this, "Se necesita permiso de micrófono.", Toast.LENGTH_SHORT).show();
+        }
+    }
 
     /** Ordena las opciones no elegidas, priorizando las sugerencias aprendidas. */
     private List<String> palabrasDisponiblesOrdenadas() {
@@ -536,12 +778,13 @@ public class MainActivity extends Activity {
         return panel;
     }
 
-    private void liberarFiltro() { filtroTeclado=""; actualizarTrasTecla(); }
+    private void liberarFiltro() { if (escuchandoVoz) return; filtroTeclado=""; actualizarTrasTecla(); }
 
     /** Espacio se muestra como "_" para que la tecla sea visible. */
     private String etiquetaTecla(char letra) { return letra == ' ' ? "_" : String.valueOf(letra); }
 
     private void borrarUltimaTecla() {
+        if (escuchandoVoz) return;
         if (filtroTeclado.isEmpty()) return;
         filtroTeclado = filtroTeclado.substring(0, filtroTeclado.length() - 1);
         actualizarTrasTecla();
