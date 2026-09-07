@@ -29,9 +29,9 @@ import java.util.Locale;
 
 /**
  * PDF siempre A4 vertical.
- * Picto real = 1/10 del ancho A4 (se reduce solo si algún marco no entra);
+ * Picto real = 1/10 del ancho A4 (se reduce solo si no caben apiladas);
  * automáticos misma altura y ancho variable; renglón con wrap; alineación a la izquierda;
- * frases repartidas en vertical con separación mínima entre marcos.
+ * frases apiladas desde arriba con separación mínima entre marcos.
  */
 public final class FrasePdfExporter {
     private static final String DIR_PICTOS = "pictos";
@@ -67,19 +67,19 @@ public final class FrasePdfExporter {
         float xPictos = MARGEN + NUM_ANCHO;
         float anchoUtil = A4_ANCHO - xPictos - MARGEN;
         float huecos = Math.max(0, n - 1) * SEPARACION_MIN;
-        float banda = (A4_ALTO - MARGEN * 2f - huecos) / n;
+        float altoDisponible = A4_ALTO - MARGEN * 2f - huecos;
 
         float lado = LADO_BASE;
         List<BloqueFrase> bloques = medirTodas(frases, anchoUtil, lado);
-        // Solo reduce si hace falta; itera porque con varios renglones el padding/gaps
-        // no escalan igual que el picto y una sola pasada a veces no alcanza.
+        // Solo reduce si al apilar desde arriba no caben; itera porque con varios
+        // renglones el padding/gaps no escalan igual que el picto.
         for (int intento = 0; intento < 8; intento++) {
-            float maxMarco = 0f;
+            float altoTotal = 0f;
             for (BloqueFrase b : bloques) {
-                maxMarco = Math.max(maxMarco, Math.max(b.alto, 24f) + PAD_MARCO * 2f);
+                altoTotal += Math.max(b.alto, 24f) + PAD_MARCO * 2f;
             }
-            if (maxMarco <= banda + 0.5f) break;
-            float factor = (banda / maxMarco) * 0.97f;
+            if (altoTotal <= altoDisponible + 0.5f) break;
+            float factor = (altoDisponible / altoTotal) * 0.97f;
             if (factor >= 0.999f) break;
             lado = Math.max(18f, lado * factor);
             bloques = medirTodas(frases, anchoUtil, lado);
@@ -90,23 +90,23 @@ public final class FrasePdfExporter {
         bordeMarco.setStrokeWidth(1.6f);
         bordeMarco.setColor(0xff455a64);
 
+        float yCursor = MARGEN;
         for (int i = 0; i < n; i++) {
-            float bandaTop = MARGEN + i * (banda + SEPARACION_MIN);
             BloqueFrase bloque = bloques.get(i);
             float contenidoAlto = Math.max(bloque.alto, 24f);
-            float marcoAlto = Math.min(contenidoAlto + PAD_MARCO * 2f, banda);
-            float marcoTop = bandaTop + (banda - marcoAlto) / 2f;
+            float marcoAlto = contenidoAlto + PAD_MARCO * 2f;
+            float marcoTop = yCursor;
             RectF marco = new RectF(MARGEN, marcoTop, A4_ANCHO - MARGEN, marcoTop + marcoAlto);
             canvas.drawRoundRect(marco, 12f, 12f, bordeMarco);
 
-            float altoUtilMarco = Math.max(0f, marcoAlto - PAD_MARCO * 2f);
-            float yBloque = marcoTop + PAD_MARCO + Math.max(0f, (altoUtilMarco - bloque.alto) / 2f);
+            float yBloque = marcoTop + PAD_MARCO;
             float cyNumero = marcoTop + marcoAlto / 2f;
             dibujarNumero(canvas, i + 1, cyNumero, lado);
             canvas.save();
             canvas.clipRect(marco.left + 2f, marco.top + 2f, marco.right - 2f, marco.bottom - 2f);
             dibujarBloque(context, canvas, bloque, xPictos, yBloque, lado);
             canvas.restore();
+            yCursor = marco.bottom + SEPARACION_MIN;
         }
 
         documento.finishPage(pagina);

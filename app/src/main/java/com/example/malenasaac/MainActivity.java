@@ -32,7 +32,8 @@ import java.util.*;
 
 /** Comunicador visual con composición y reproducción de frases. */
 public class MainActivity extends Activity {
-    private static final int MAX_PICTOS_VISIBLE_FRASE = 7;
+    /** Cantidad aproximada de pictos visibles a la vez en la solapa FRASES (el resto va con scroll). */
+    private static final int PICTOS_VISIBLES_FRASE = 4;
     private static final int MAX_FRASES_PDF = 7;
     private static final int MAX_PICTOS_JUEGO = 4;
     private static final int SEGUNDOS_MAX_ESCUCHA = 20;
@@ -1127,6 +1128,7 @@ public class MainActivity extends Activity {
         icono.setOnClickListener(v->{item.negado=!item.negado;raya.setVisibility(item.negado?View.VISIBLE:View.GONE);icono.setContentDescription((item.negado ? "Afirmar " : "Negar ") + nombre(item.archivo));});
         fila.addView(icono,fijo(dp(70),dp(70),dp(4)));
         TextView nombre=new TextView(this); nombre.setText(nombre(item.archivo)); nombre.setTextSize(20f * 1.12f); nombre.setTypeface(nombre.getTypeface(), Typeface.BOLD); nombre.setGravity(Gravity.CENTER_VERTICAL); fila.addView(nombre,peso(1,-1,dp(4)));
+        configurarArrastrePalabra(fila, item, icono, nombre);
         ImageButton papelera=papelera("Quitar una selección"); papelera.setOnClickListener(v->quitar(item)); fila.addView(papelera,fijo(dp(54),dp(54),0)); return fila;
     }
 
@@ -1144,10 +1146,92 @@ public class MainActivity extends Activity {
         etiqueta.setTypeface(Typeface.DEFAULT);
         etiqueta.setGravity(Gravity.CENTER_VERTICAL);
         fila.addView(etiqueta, peso(1, -1, dp(8)));
+        configurarArrastrePalabra(fila, item, etiqueta);
         ImageButton papelera = papelera("Quitar palabra sin picto");
         papelera.setOnClickListener(v -> quitar(item));
         fila.addView(papelera, fijo(dp(44), dp(44), 0));
         return fila;
+    }
+
+    /** Asa ☰ + long-press para reordenar pictos del borrador (como en Frases). */
+    private void configurarArrastrePalabra(LinearLayout fila, PhraseRecord.Item item, View... zonas) {
+        fila.setTag(item);
+        if (escuchandoVoz || borrador.size() < 2) return;
+
+        TextView asa = new TextView(this);
+        asa.setText("☰");
+        asa.setTextSize(18);
+        asa.setTextColor(0xff263238);
+        asa.setGravity(Gravity.CENTER);
+        asa.setContentDescription("Arrastrar para cambiar el orden");
+        View.OnLongClickListener iniciar = v -> iniciarDragPalabra(fila, item);
+        asa.setOnLongClickListener(iniciar);
+        fila.setOnLongClickListener(iniciar);
+        fila.setOnDragListener((v, e) -> alArrastrarPalabra(v, e));
+        for (View zona : zonas) {
+            if (zona != null) zona.setOnLongClickListener(iniciar);
+        }
+        fila.addView(asa, fijo(dp(36), dp(48), 0));
+    }
+
+    private boolean iniciarDragPalabra(View fila, PhraseRecord.Item item) {
+        if (escuchandoVoz || item == null || !borrador.contains(item) || borrador.size() < 2) return false;
+        ClipData datos = ClipData.newPlainText("palabra_borrador", "mover");
+        View.DragShadowBuilder sombra = new View.DragShadowBuilder(fila);
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.N) {
+            fila.startDragAndDrop(datos, sombra, item, 0);
+        } else {
+            fila.startDrag(datos, sombra, item, 0);
+        }
+        return true;
+    }
+
+    private boolean alArrastrarPalabra(View destinoVista, DragEvent evento) {
+        Object estado = evento.getLocalState();
+        if (!(estado instanceof PhraseRecord.Item)) return false;
+        PhraseRecord.Item origen = (PhraseRecord.Item) estado;
+        Object tag = destinoVista.getTag();
+        if (!(tag instanceof PhraseRecord.Item)) return false;
+        PhraseRecord.Item destino = (PhraseRecord.Item) tag;
+        if (!borrador.contains(origen) || !borrador.contains(destino)) return false;
+        float alphaNormal = destino.automatico ? 0.55f : 1f;
+
+        switch (evento.getAction()) {
+            case DragEvent.ACTION_DRAG_STARTED:
+                return true;
+            case DragEvent.ACTION_DRAG_ENTERED:
+                destinoVista.setAlpha(destino.automatico ? 0.3f : 0.55f);
+                return true;
+            case DragEvent.ACTION_DRAG_LOCATION:
+                return true;
+            case DragEvent.ACTION_DRAG_EXITED:
+                destinoVista.setAlpha(alphaNormal);
+                return true;
+            case DragEvent.ACTION_DROP:
+                destinoVista.setAlpha(alphaNormal);
+                reordenarPalabraBorrador(origen, destino);
+                return true;
+            case DragEvent.ACTION_DRAG_ENDED:
+                destinoVista.setAlpha(alphaNormal);
+                return true;
+            default:
+                return false;
+        }
+    }
+
+    private void reordenarPalabraBorrador(PhraseRecord.Item origen, PhraseRecord.Item destino) {
+        if (origen == destino || escuchandoVoz) return;
+        int desde = borrador.indexOf(origen);
+        int hasta = borrador.indexOf(destino);
+        if (desde < 0 || hasta < 0 || desde == hasta) return;
+        borrador.remove(desde);
+        if (desde < hasta) hasta--;
+        borrador.add(hasta, origen);
+        int scrollY = scrollLista == null ? 0 : scrollLista.getScrollY();
+        mostrarPalabras();
+        if (scrollLista != null) {
+            scrollLista.post(() -> scrollLista.scrollTo(0, scrollY));
+        }
     }
     private View filaCandidato(String archivo, int indice) {
         LinearLayout fila = nuevaFila(); fila.setBackground(fondoPalabra(indice, false));
@@ -1186,9 +1270,10 @@ public class MainActivity extends Activity {
         h.setPadding(dp(26), dp(2), dp(68), dp(2));
         LinearLayout iconos = new LinearLayout(this);
         iconos.setGravity(Gravity.CENTER_VERTICAL);
-        h.addView(iconos);
+        h.addView(iconos, new FrameLayout.LayoutParams(-2, -1));
         h.post(() -> dibujarIconosDeFrase(iconos, h, frase));
-        marco.addView(h, new FrameLayout.LayoutParams(-1, dp(78)));
+        // Fila más alta para que ~4 pictos grandes ocupen el contenedor.
+        marco.addView(h, new FrameLayout.LayoutParams(-1, dp(112)));
 
         CheckBox check = new CheckBox(this);
         check.setChecked(seleccionada);
@@ -1307,27 +1392,15 @@ public class MainActivity extends Activity {
         for (PhraseRecord.Item item : frase.items) {
             if (!item.automatico) reales.add(item);
         }
-        int total = reales.size();
-        int visibles = Math.min(total, MAX_PICTOS_VISIBLE_FRASE);
-        boolean hayMas = total > MAX_PICTOS_VISIBLE_FRASE;
-        int slots = visibles + (hayMas ? 1 : 0);
-        int lado = dp(56);
-        if (slots > 0 && espacio.getWidth() > 0) {
-            lado = Math.min(lado, Math.max(dp(30), (espacio.getWidth() - slots * margen * 2) / slots));
-        }
-        for (int i = 0; i < visibles; i++) {
-            destino.addView(picto(reales.get(i), false, lado, margen));
-        }
-        if (hayMas) {
-            TextView puntos = new TextView(this);
-            puntos.setText("…");
-            puntos.setTextColor(0xff546e7a);
-            puntos.setTextSize(TypedValue.COMPLEX_UNIT_PX, lado * 0.55f);
-            puntos.setGravity(Gravity.CENTER);
-            puntos.setTypeface(Typeface.DEFAULT_BOLD);
-            LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(lado, lado);
-            lp.setMargins(margen, margen, margen, margen);
-            destino.addView(puntos, lp);
+        int anchoUtil = Math.max(0, espacio.getWidth() - espacio.getPaddingLeft() - espacio.getPaddingRight());
+        int altoUtil = Math.max(0, espacio.getHeight() - espacio.getPaddingTop() - espacio.getPaddingBottom());
+        int ladoPorAlto = Math.max(dp(48), altoUtil - margen * 2);
+        int ladoPorAncho = anchoUtil > 0
+                ? Math.max(dp(48), (anchoUtil - PICTOS_VISIBLES_FRASE * margen * 2) / PICTOS_VISIBLES_FRASE)
+                : ladoPorAlto;
+        int lado = Math.min(ladoPorAlto, ladoPorAncho);
+        for (PhraseRecord.Item item : reales) {
+            destino.addView(picto(item, false, lado, margen));
         }
     }
     private LinearLayout nuevaFila() { LinearLayout f=new LinearLayout(this); f.setGravity(Gravity.CENTER_VERTICAL); f.setPadding(dp(8),dp(6),dp(8),dp(6)); f.setBackground(fondo()); LinearLayout.LayoutParams p=new LinearLayout.LayoutParams(-1,-2);p.setMargins(0,dp(3),0,dp(3));f.setLayoutParams(p);return f; }
