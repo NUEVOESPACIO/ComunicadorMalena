@@ -16,7 +16,7 @@ import java.util.Set;
 public final class ReglasPictosFrase {
     private static final Set<String> CONECTORES = new HashSet<>(Arrays.asList(
             "EL", "LA", "LOS", "LAS", "UN", "UNA", "UNOS", "UNAS",
-            "DE", "DEL", "Y", "E", "O", "U", "A", "EN", "CON", "POR", "PARA", "QUE",
+            "DE", "DEL", "Y", "E", "O", "U", "A", "EN", "POR", "PARA", "QUE",
             "ESTOY", "ESTAS", "ESTAMOS", "SON", "SER",
             "MUY", "MAS", "MUCHO", "POCO", "TAL", "VEZ", "COMO", "SI", "YA",
             "ME", "TE", "LE", "LO", "MI", "TU", "SU", "QUIERO", "QUIERES"
@@ -129,6 +129,7 @@ public final class ReglasPictosFrase {
 
         agregarSinonimo("ES", "es");
         agregarSinonimo("ESTA", "esta");
+        agregarSinonimo("CON", "conn");
 
         agregarSinonimo("JULY", "mama");
         agregarSinonimo("JULIANA", "mama");
@@ -140,6 +141,12 @@ public final class ReglasPictosFrase {
 
         agregarSinonimo("SOFI", "fonoaudiologa");
         agregarSinonimo("SOFIA", "fonoaudiologa");
+
+        // Irse / marcharse → ir.png (evita que "se" matchee secar por prefijo)
+        agregarFrase("SE VA A IR", "ir");
+        agregarFrase("SE VA", "ir");
+        agregarFrase("SE FUE", "ir");
+        agregarFrase("SE IRA", "ir");
     }
 
     private ReglasPictosFrase() { }
@@ -178,6 +185,7 @@ public final class ReglasPictosFrase {
     static List<ReglaPictoFrase> reglas() {
         List<ReglaPictoFrase> reglas = new ArrayList<>();
         reglas.add(new ReglaPalabraEs());
+        reglas.add(new ReglaPalabraCon());
         reglas.add(new ReglaContextoPapaPapas());
         reglas.add(new ReglaFrasesCompuestas());
         reglas.add(new ReglaSinonimos());
@@ -344,6 +352,19 @@ public final class ReglasPictosFrase {
         }
     }
 
+    /** Palabra exacta "con" (conector) → conn.png, sin mezclar con contento/control/etc. */
+    private static final class ReglaPalabraCon implements ReglaPictoFrase {
+        @Override
+        public CoincidenciaPicto resolver(String[] palabras, int indice, List<String> pictos,
+                AlgoritmoPictosFrase.ProveedorNombre nombres) {
+            if (indice >= palabras.length) return null;
+            if (!"CON".equals(AlgoritmoPictosFrase.normalizar(palabras[indice]))) return null;
+            String archivo = buscarArchivoPorStemExacto(pictos, "CONN");
+            if (archivo == null) return null;
+            return new CoincidenciaPicto(archivo, false, 1);
+        }
+    }
+
     /** Desambigua papa (papá) vs papas según si el habla trata de comida. */
     private static final class ReglaContextoPapaPapas implements ReglaPictoFrase {
         @Override
@@ -372,8 +393,11 @@ public final class ReglasPictosFrase {
 
     private static CoincidenciaPicto resolverFrase(String[] palabras, int indice, List<String> pictos,
             AlgoritmoPictosFrase.ProveedorNombre nombres, boolean negado) {
+        CoincidenciaPicto mejor = null;
+        int mejorLargo = 0;
         for (Map.Entry<String, String> entrada : FRASES.entrySet()) {
             String[] partes = entrada.getKey().split("\\s+");
+            if (partes.length <= mejorLargo) continue;
             if (indice + partes.length > palabras.length) continue;
             boolean coincide = true;
             for (int i = 0; i < partes.length; i++) {
@@ -383,12 +407,16 @@ public final class ReglasPictosFrase {
                 }
             }
             if (!coincide) continue;
-            String ultimaPalabra = partes[partes.length - 1];
-            String archivo = buscarArchivoPorGenero(pictos, nombres, ultimaPalabra);
+            // Usa el picto mapeado (no la última palabra), para evitar "SE VA" → vaca/secar.
+            String archivo = buscarArchivoPorStemExacto(pictos,
+                    AlgoritmoPictosFrase.normalizar(entrada.getValue()));
             if (archivo == null) archivo = buscarArchivoPorGenero(pictos, nombres, entrada.getValue());
-            if (archivo != null) return new CoincidenciaPicto(archivo, negado, partes.length);
+            if (archivo != null) {
+                mejor = new CoincidenciaPicto(archivo, negado, partes.length);
+                mejorLargo = partes.length;
+            }
         }
-        return null;
+        return mejor;
     }
 
     /** Palabras alternativas que apuntan al mismo picto. */

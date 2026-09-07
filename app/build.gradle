@@ -17,7 +17,12 @@ android {
     }
 
     buildTypes {
+        debug {
+            // Firma con la key debug por defecto de Android (se crea sola si falta).
+        }
         release {
+            // Firma con debug para poder instalar en el móvil sin keystore de release.
+            signingConfig signingConfigs.debug
             minifyEnabled false
             proguardFiles getDefaultProguardFile('proguard-android-optimize.txt'), 'proguard-rules.pro'
         }
