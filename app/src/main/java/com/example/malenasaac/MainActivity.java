@@ -33,6 +33,7 @@ import java.util.*;
 /** Comunicador visual con composición y reproducción de frases. */
 public class MainActivity extends Activity {
     private static final int MAX_PICTOS_VISIBLE_FRASE = 7;
+    private static final int MAX_FRASES_PDF = 7;
     private static final int MAX_PICTOS_JUEGO = 4;
     private static final int SEGUNDOS_MAX_ESCUCHA = 20;
     private static final int COLUMNAS_MOSAICO_JUEGO = 5;
@@ -63,6 +64,8 @@ public class MainActivity extends Activity {
     private ImageButton botonReciclajeJuego;
     private final List<String> pictos = new ArrayList<>();
     private final List<PhraseRecord> frases = new ArrayList<>();
+    /** Frases marcadas para PDF; el orden de selección define la secuencia 1..N. */
+    private final List<PhraseRecord> frasesSeleccionadas = new ArrayList<>();
     private final List<PhraseRecord.Item> borrador = new ArrayList<>();
     private int solapaActual = SOLAPA_PALABRAS;
     private int frasesDescartadasAlCargar;
@@ -150,6 +153,27 @@ public class MainActivity extends Activity {
         frasesDescartadasAlCargar = cargadas.size() - validas.size();
         frases.addAll(validas);
         if (frasesDescartadasAlCargar > 0) PhraseStore.guardar(this, frases);
+        restaurarSeleccionPdf();
+    }
+
+    /** Recupera las frases marcadas para PDF emparejando por contenido. */
+    private void restaurarSeleccionPdf() {
+        frasesSeleccionadas.clear();
+        List<PhraseRecord> guardadas = PhraseStore.cargarSeleccionPdf(this);
+        for (PhraseRecord sel : guardadas) {
+            if (frasesSeleccionadas.size() >= MAX_FRASES_PDF) break;
+            for (PhraseRecord f : frases) {
+                if (frasesSeleccionadas.contains(f)) continue;
+                if (mismosItems(f.items, sel.items)) {
+                    frasesSeleccionadas.add(f);
+                    break;
+                }
+            }
+        }
+    }
+
+    private void persistirSeleccionPdf() {
+        PhraseStore.guardarSeleccionPdf(this, frasesSeleccionadas);
     }
 
     /** Decodifica miniaturas en segundo plano para que la primera tecla ya las tenga listas. */
@@ -758,8 +782,103 @@ public class MainActivity extends Activity {
         solapaActual = SOLAPA_FRASES; actualizarTabs();
         scrollLista.setVisibility(View.VISIBLE); juegoPanel.setVisibility(View.GONE);
         lista.removeAllViews();
-        if(frases.isEmpty()) { TextView v=new TextView(this); v.setText("Todavía no hay frases guardadas."); v.setTextSize(18); v.setGravity(Gravity.CENTER); v.setPadding(0,dp(35),0,0); lista.addView(v); }
-        int indice=0; for(PhraseRecord f:frases) lista.addView(filaFrase(f, indice++));
+        limpiarSeleccionInvalida();
+        if (frases.isEmpty()) {
+            TextView v = new TextView(this);
+            v.setText("Todavía no hay frases guardadas.");
+            v.setTextSize(18);
+            v.setGravity(Gravity.CENTER);
+            v.setPadding(0, dp(35), 0, 0);
+            lista.addView(v);
+            return;
+        }
+        List<PhraseRecord> resto = new ArrayList<>();
+        for (PhraseRecord f : frases) {
+            if (!frasesSeleccionadas.contains(f)) resto.add(f);
+        }
+        int indice = 0;
+        for (PhraseRecord f : frasesSeleccionadas) lista.addView(filaFrase(f, indice++, true));
+        if (!frasesSeleccionadas.isEmpty()) lista.addView(filaBotonCrearPdf());
+        for (PhraseRecord f : resto) lista.addView(filaFrase(f, indice++, false));
+    }
+
+    private void limpiarSeleccionInvalida() {
+        int antes = frasesSeleccionadas.size();
+        for (int i = frasesSeleccionadas.size() - 1; i >= 0; i--) {
+            if (!frases.contains(frasesSeleccionadas.get(i))) frasesSeleccionadas.remove(i);
+        }
+        while (frasesSeleccionadas.size() > MAX_FRASES_PDF) {
+            frasesSeleccionadas.remove(frasesSeleccionadas.size() - 1);
+        }
+        if (frasesSeleccionadas.size() != antes) persistirSeleccionPdf();
+    }
+
+    private View filaBotonCrearPdf() {
+        LinearLayout fila = new LinearLayout(this);
+        fila.setGravity(Gravity.CENTER);
+        fila.setPadding(dp(8), dp(4), dp(8), dp(4));
+        LinearLayout.LayoutParams fp = new LinearLayout.LayoutParams(-1, -2);
+        fp.setMargins(0, dp(2), 0, dp(8));
+        fila.setLayoutParams(fp);
+
+        Button boton = new Button(this);
+        boton.setText("Crear PDF");
+        boton.setAllCaps(false);
+        boton.setTextSize(14);
+        boton.setPadding(dp(18), dp(6), dp(18), dp(6));
+        boton.setMinHeight(0);
+        boton.setMinimumHeight(0);
+        GradientDrawable fondo = new GradientDrawable();
+        fondo.setColor(0xff496f88);
+        fondo.setCornerRadius(dp(12));
+        boton.setBackground(fondo);
+        boton.setTextColor(Color.WHITE);
+        boton.setOnClickListener(v -> crearPdfFrasesSeleccionadas());
+        LinearLayout.LayoutParams bp = new LinearLayout.LayoutParams(-2, -2);
+        fila.addView(boton, bp);
+        return fila;
+    }
+
+    private void crearPdfFrasesSeleccionadas() {
+        if (frasesSeleccionadas.isEmpty()) {
+            Toast.makeText(this, "Seleccioná al menos una frase.", Toast.LENGTH_SHORT).show();
+            return;
+        }
+        try {
+            Uri uri = FrasePdfExporter.exportar(this, new ArrayList<>(frasesSeleccionadas));
+            Toast.makeText(this, "PDF guardado en Descargas / Malena Comunicador", Toast.LENGTH_LONG).show();
+            Intent ver = new Intent(Intent.ACTION_VIEW);
+            ver.setDataAndType(uri, "application/pdf");
+            ver.addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION);
+            try {
+                startActivity(ver);
+            } catch (ActivityNotFoundException ignored) {
+                Intent compartir = new Intent(Intent.ACTION_SEND);
+                compartir.setType("application/pdf");
+                compartir.putExtra(Intent.EXTRA_STREAM, uri);
+                compartir.addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION);
+                startActivity(Intent.createChooser(compartir, "Compartir PDF"));
+            }
+        } catch (IOException e) {
+            Toast.makeText(this, "No se pudo crear el PDF.", Toast.LENGTH_SHORT).show();
+        }
+    }
+
+    private void alternarSeleccionFrase(PhraseRecord frase, boolean seleccionar) {
+        if (seleccionar) {
+            if (frasesSeleccionadas.contains(frase)) return;
+            if (frasesSeleccionadas.size() >= MAX_FRASES_PDF) {
+                Toast.makeText(this, "Podés seleccionar hasta " + MAX_FRASES_PDF + " frases.", Toast.LENGTH_SHORT).show();
+                mostrarFrases();
+                return;
+            }
+            frasesSeleccionadas.add(frase);
+        } else {
+            frasesSeleccionadas.remove(frase);
+        }
+        persistirSeleccionPdf();
+        mostrarFrases();
+        scrollLista.post(() -> scrollLista.scrollTo(0, 0));
     }
     private void mostrarJuego() {
         if (escuchandoVoz) return;
@@ -1051,16 +1170,135 @@ public class MainActivity extends Activity {
         etiqueta.setSpan(new RelativeSizeSpan(1.12f), 0, largo, Spanned.SPAN_EXCLUSIVE_EXCLUSIVE);
         return etiqueta;
     }
-    private View filaFrase(PhraseRecord frase, int indice) {
-        LinearLayout fila=nuevaFila(); fila.setBackground(fondoFrase(indice, false));
-        HorizontalScrollView h=new HorizontalScrollView(this); h.setHorizontalScrollBarEnabled(false); h.setFillViewport(true);
-        LinearLayout iconos=new LinearLayout(this); iconos.setGravity(Gravity.CENTER_VERTICAL); h.addView(iconos);
-        h.post(()->dibujarIconosDeFrase(iconos,h,frase));
-        fila.addView(h,peso(1,dp(82),0));
-        ImageButton play = new ImageButton(this); play.setImageResource(android.R.drawable.ic_media_play);
-        play.setContentDescription("Reproducir frase"); play.setBackgroundColor(Color.TRANSPARENT);
-        play.setOnClickListener(v -> ejecutarFrase(frase)); fila.addView(play,fijo(dp(54),dp(54),0));
-        ImageButton borrar=papelera("Eliminar frase"); borrar.setOnClickListener(v->confirmar(frase)); fila.addView(borrar,fijo(dp(54),dp(54),0)); return fila;
+    private View filaFrase(PhraseRecord frase, int indice, boolean seleccionada) {
+        FrameLayout marco = new FrameLayout(this);
+        marco.setBackground(fondoFrase(indice, seleccionada));
+        marco.setTag(frase);
+        LinearLayout.LayoutParams mp = new LinearLayout.LayoutParams(-1, -2);
+        mp.setMargins(0, dp(3), 0, dp(3));
+        marco.setLayoutParams(mp);
+        marco.setPadding(dp(4), dp(2), dp(2), dp(2));
+
+        HorizontalScrollView h = new HorizontalScrollView(this);
+        h.setHorizontalScrollBarEnabled(false);
+        h.setFillViewport(true);
+        // Deja hueco mínimo a los costados; los controles van superpuestos.
+        h.setPadding(dp(26), dp(2), dp(68), dp(2));
+        LinearLayout iconos = new LinearLayout(this);
+        iconos.setGravity(Gravity.CENTER_VERTICAL);
+        h.addView(iconos);
+        h.post(() -> dibujarIconosDeFrase(iconos, h, frase));
+        marco.addView(h, new FrameLayout.LayoutParams(-1, dp(78)));
+
+        CheckBox check = new CheckBox(this);
+        check.setChecked(seleccionada);
+        check.setContentDescription("Seleccionar frase para PDF");
+        check.setPadding(0, 0, 0, 0);
+        check.setScaleX(0.82f);
+        check.setScaleY(0.82f);
+        check.setOnClickListener(v -> alternarSeleccionFrase(frase, check.isChecked()));
+        FrameLayout.LayoutParams cp = new FrameLayout.LayoutParams(dp(28), dp(28), Gravity.TOP | Gravity.START);
+        cp.leftMargin = dp(-2);
+        cp.topMargin = dp(-2);
+        marco.addView(check, cp);
+
+        LinearLayout acciones = new LinearLayout(this);
+        acciones.setOrientation(LinearLayout.VERTICAL);
+        acciones.setGravity(Gravity.CENTER_HORIZONTAL);
+
+        ImageButton play = new ImageButton(this);
+        play.setImageResource(android.R.drawable.ic_media_play);
+        play.setContentDescription("Reproducir frase");
+        play.setBackgroundColor(Color.TRANSPARENT);
+        play.setPadding(dp(2), dp(2), dp(2), dp(2));
+        play.setScaleType(ImageView.ScaleType.CENTER_INSIDE);
+        play.setOnClickListener(v -> ejecutarFrase(frase));
+        acciones.addView(play, new LinearLayout.LayoutParams(dp(34), dp(34)));
+
+        ImageButton borrar = papelera("Eliminar frase");
+        borrar.setPadding(dp(2), dp(2), dp(2), dp(2));
+        borrar.setScaleType(ImageView.ScaleType.CENTER_INSIDE);
+        borrar.setOnClickListener(v -> confirmar(frase));
+        acciones.addView(borrar, new LinearLayout.LayoutParams(dp(34), dp(34)));
+
+        FrameLayout.LayoutParams ap = new FrameLayout.LayoutParams(-2, -2, Gravity.END | Gravity.CENTER_VERTICAL);
+        marco.addView(acciones, ap);
+
+        if (seleccionada) {
+            TextView asa = new TextView(this);
+            asa.setText("☰");
+            asa.setTextSize(16);
+            asa.setTextColor(0xff382060);
+            asa.setGravity(Gravity.CENTER);
+            asa.setContentDescription("Arrastrar para cambiar el orden");
+            asa.setPadding(0, 0, 0, 0);
+            View.OnLongClickListener iniciar = v -> iniciarDragFrase(marco, frase);
+            asa.setOnLongClickListener(iniciar);
+            marco.setOnLongClickListener(iniciar);
+            marco.setOnDragListener((v, e) -> alArrastrarFrase(v, e));
+            h.setOnLongClickListener(v -> iniciarDragFrase(marco, frase));
+            FrameLayout.LayoutParams asp = new FrameLayout.LayoutParams(dp(22), dp(22), Gravity.BOTTOM | Gravity.START);
+            asp.leftMargin = dp(2);
+            asp.bottomMargin = dp(0);
+            marco.addView(asa, asp);
+        }
+        return marco;
+    }
+
+    private boolean iniciarDragFrase(View fila, PhraseRecord frase) {
+        if (!frasesSeleccionadas.contains(frase) || frasesSeleccionadas.size() < 2) return false;
+        ClipData datos = ClipData.newPlainText("frase_pdf", "mover");
+        View.DragShadowBuilder sombra = new View.DragShadowBuilder(fila);
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.N) {
+            fila.startDragAndDrop(datos, sombra, frase, 0);
+        } else {
+            fila.startDrag(datos, sombra, frase, 0);
+        }
+        return true;
+    }
+
+    private boolean alArrastrarFrase(View destinoVista, DragEvent evento) {
+        Object estado = evento.getLocalState();
+        if (!(estado instanceof PhraseRecord)) return false;
+        PhraseRecord origen = (PhraseRecord) estado;
+        Object tag = destinoVista.getTag();
+        if (!(tag instanceof PhraseRecord)) return false;
+        PhraseRecord destino = (PhraseRecord) tag;
+        if (!frasesSeleccionadas.contains(origen) || !frasesSeleccionadas.contains(destino)) return false;
+
+        switch (evento.getAction()) {
+            case DragEvent.ACTION_DRAG_STARTED:
+                return true;
+            case DragEvent.ACTION_DRAG_ENTERED:
+                destinoVista.setAlpha(0.55f);
+                return true;
+            case DragEvent.ACTION_DRAG_LOCATION:
+                return true;
+            case DragEvent.ACTION_DRAG_EXITED:
+                destinoVista.setAlpha(1f);
+                return true;
+            case DragEvent.ACTION_DROP:
+                destinoVista.setAlpha(1f);
+                reordenarFraseSeleccionada(origen, destino);
+                return true;
+            case DragEvent.ACTION_DRAG_ENDED:
+                destinoVista.setAlpha(1f);
+                return true;
+            default:
+                return false;
+        }
+    }
+
+    private void reordenarFraseSeleccionada(PhraseRecord origen, PhraseRecord destino) {
+        if (origen == destino) return;
+        int desde = frasesSeleccionadas.indexOf(origen);
+        int hasta = frasesSeleccionadas.indexOf(destino);
+        if (desde < 0 || hasta < 0 || desde == hasta) return;
+        frasesSeleccionadas.remove(desde);
+        if (desde < hasta) hasta--;
+        frasesSeleccionadas.add(hasta, origen);
+        persistirSeleccionPdf();
+        mostrarFrases();
     }
     private void dibujarIconosDeFrase(LinearLayout destino, View espacio, PhraseRecord frase) {
         destino.removeAllViews();
@@ -1343,7 +1581,18 @@ public class MainActivity extends Activity {
     }
 
     private float getTouchSlop(){return ViewConfiguration.get(this).getScaledTouchSlop();}
-    private void confirmar(PhraseRecord frase){new AlertDialog.Builder(this).setTitle("Eliminar frase").setMessage("¿Seguro que querés borrar esta frase?").setNegativeButton("Cancelar",null).setPositiveButton("Eliminar",(d,w)->{frases.remove(frase);PhraseStore.guardar(this,frases);guardarRespaldo();mostrarFrases();}).show();}
+    private void confirmar(PhraseRecord frase) {
+        new AlertDialog.Builder(this).setTitle("Eliminar frase").setMessage("¿Seguro que querés borrar esta frase?")
+                .setNegativeButton("Cancelar", null)
+                .setPositiveButton("Eliminar", (d, w) -> {
+                    frases.remove(frase);
+                    frasesSeleccionadas.remove(frase);
+                    PhraseStore.guardar(this, frases);
+                    persistirSeleccionPdf();
+                    guardarRespaldo();
+                    mostrarFrases();
+                }).show();
+    }
 
     private void ofrecerRestauracion() {
         new AlertDialog.Builder(this).setTitle("¿Restaurar frases guardadas?")
@@ -1377,7 +1626,16 @@ public class MainActivity extends Activity {
     private void confirmarRestauracion(List<PhraseRecord> validas, int descartadas, Uri uri) {
         String mensaje = "Se encontraron " + validas.size() + " frases válidas." + (descartadas == 0 ? "" : " Se descartarán " + descartadas + " frases con pictogramas eliminados.");
         new AlertDialog.Builder(this).setTitle("Restaurar frases").setMessage(mensaje).setNegativeButton("Cancelar", null)
-                .setPositiveButton("Restaurar", (d, w) -> { frases.clear(); frases.addAll(validas); PhraseStore.guardar(this, frases); BackupStore.usarDestino(this, uri); guardarRespaldo(); mostrarFrases(); }).show();
+                .setPositiveButton("Restaurar", (d, w) -> {
+                    frases.clear();
+                    frasesSeleccionadas.clear();
+                    frases.addAll(validas);
+                    PhraseStore.guardar(this, frases);
+                    persistirSeleccionPdf();
+                    BackupStore.usarDestino(this, uri);
+                    guardarRespaldo();
+                    mostrarFrases();
+                }).show();
     }
 
     private List<PhraseRecord> validarFrases(List<PhraseRecord> origen) {

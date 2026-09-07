@@ -12,6 +12,7 @@ import java.util.List;
 public final class PhraseStore {
     private static final String PREFS = "comunicador_visual";
     private static final String KEY = "frases";
+    private static final String KEY_SELECCION_PDF = "frases_pdf_seleccion";
 
     private PhraseStore() { }
 
@@ -25,6 +26,21 @@ public final class PhraseStore {
 
     public static void guardar(Context c, List<PhraseRecord> frases) {
         c.getSharedPreferences(PREFS, Context.MODE_PRIVATE).edit().putString(KEY, aJson(frases)).apply();
+    }
+
+    /** Frases marcadas para PDF (orden de selección), memorizadas al cerrar la app. */
+    public static List<PhraseRecord> cargarSeleccionPdf(Context c) {
+        try {
+            return desdeJson(c.getSharedPreferences(PREFS, Context.MODE_PRIVATE).getString(KEY_SELECCION_PDF, "[]"));
+        } catch (Exception ignored) {
+            return new ArrayList<>();
+        }
+    }
+
+    public static void guardarSeleccionPdf(Context c, List<PhraseRecord> seleccion) {
+        c.getSharedPreferences(PREFS, Context.MODE_PRIVATE).edit()
+                .putString(KEY_SELECCION_PDF, aJson(seleccion == null ? new ArrayList<PhraseRecord>() : seleccion))
+                .apply();
     }
 
     /** Acepta el formato anterior (un arreglo) y el respaldo versionado actual. */
