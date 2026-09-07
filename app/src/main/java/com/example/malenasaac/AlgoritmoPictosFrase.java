@@ -21,6 +21,20 @@ public final class AlgoritmoPictosFrase {
      */
     public static List<CoincidenciaPicto> coincidencias(String textoReconocido, List<String> pictos,
             ProveedorNombre nombres) {
+        return recorrer(textoReconocido, pictos, nombres, false);
+    }
+
+    /**
+     * Igual que {@link #coincidencias}, pero intercala pictos automáticos (texto)
+     * para conectores y palabras sin match, pensado para el tren de reproducción.
+     */
+    public static List<CoincidenciaPicto> secuenciaConAutomaticos(String textoReconocido, List<String> pictos,
+            ProveedorNombre nombres) {
+        return recorrer(textoReconocido, pictos, nombres, true);
+    }
+
+    private static List<CoincidenciaPicto> recorrer(String textoReconocido, List<String> pictos,
+            ProveedorNombre nombres, boolean incluirAutomaticos) {
         List<CoincidenciaPicto> resultados = new ArrayList<>();
         String[] palabras = palabras(normalizar(textoReconocido));
         if (palabras.length == 0 || pictos.isEmpty()) return resultados;
@@ -35,7 +49,22 @@ public final class AlgoritmoPictosFrase {
                 i += prefijoNegacion - 1;
                 continue;
             }
-            if (ReglasPictosFrase.esConector(palabras[i])) continue;
+
+            // Antes de conectores/reglas: "a veces", "se va", etc. como bloque de texto.
+            int soloAutomatico = ReglasPictosFrase.consumirSoloAutomatico(palabras, i);
+            if (soloAutomatico > 0) {
+                if (incluirAutomaticos) {
+                    resultados.add(CoincidenciaPicto.automatico(unir(palabras, i, soloAutomatico)));
+                }
+                proximoNegado = false;
+                i += soloAutomatico - 1;
+                continue;
+            }
+
+            if (ReglasPictosFrase.esConector(palabras[i])) {
+                if (incluirAutomaticos) resultados.add(CoincidenciaPicto.automatico(palabras[i]));
+                continue;
+            }
 
             CoincidenciaPicto porRegla = ReglasPictosFrase.aplicar(palabras, i, pictos, nombres);
             if (porRegla != null) {
@@ -50,13 +79,16 @@ public final class AlgoritmoPictosFrase {
                 resultados.add(aplicarNegacion(proximoNegado, porSimilitud));
                 proximoNegado = false;
                 i += porSimilitud.palabrasConsumidas - 1;
+            } else if (incluirAutomaticos) {
+                resultados.add(CoincidenciaPicto.automatico(palabras[i]));
+                proximoNegado = false;
             }
         }
         return resultados;
     }
 
     private static CoincidenciaPicto aplicarNegacion(boolean negado, CoincidenciaPicto coincidencia) {
-        if (!negado) return coincidencia;
+        if (!negado || coincidencia.automatico) return coincidencia;
         return new CoincidenciaPicto(coincidencia.archivo, true, coincidencia.palabrasConsumidas);
     }
 
@@ -84,6 +116,10 @@ public final class AlgoritmoPictosFrase {
             for (String archivo : pictos) {
                 String nombrePicto = normalizar(nombres.nombre(archivo));
                 if (nombrePicto.isEmpty()) continue;
+                if (ReglasPictosFrase.esPictoRestringido(archivo)
+                        && !ReglasPictosFrase.segmentoPermitePictoRestringido(segmento, archivo)) {
+                    continue;
+                }
                 float similitud = similitud(segmento, nombrePicto);
                 if (similitud >= SIMILITUD_MINIMA && (similitud > mejorSimilitud
                         || (similitud == mejorSimilitud && largo > mejorLargo))) {
@@ -107,6 +143,10 @@ public final class AlgoritmoPictosFrase {
         for (String archivo : pictos) {
             String nombrePicto = normalizar(nombres.nombre(archivo));
             if (nombrePicto.isEmpty()) continue;
+            if (ReglasPictosFrase.esPictoRestringido(archivo)
+                    && !ReglasPictosFrase.segmentoPermitePictoRestringido(segmentoNorm, archivo)) {
+                continue;
+            }
             float similitud = similitud(segmentoNorm, nombrePicto);
             if (similitud >= SIMILITUD_MINIMA && similitud > mejorSimilitud) {
                 mejorSimilitud = similitud;

@@ -142,12 +142,39 @@ public final class ReglasPictosFrase {
         agregarSinonimo("SOFI", "fonoaudiologa");
         agregarSinonimo("SOFIA", "fonoaudiologa");
 
-        // Irse / marcharse → ir.png (evita que "se" matchee secar por prefijo)
+        // Irse / marcharse → ir.png
         agregarFrase("SE VA A IR", "ir");
-        agregarFrase("SE VA", "ir");
         agregarFrase("SE FUE", "ir");
         agregarFrase("SE IRA", "ir");
+        agregarFrase("VA A", "ir");
+        agregarSinonimo("VA", "ir");
+        // "SE VA" / "SE VA A" van a automático (ver FRASES_SOLO_AUTOMATICAS), no a secar ni a ir.
+
+        // Solo si se dijo caca/pis explícitamente (no por prefijo de "hacer").
+        agregarFrase("HACER CACA", "hacer caca");
+        agregarSinonimo("CACA", "hacer caca");
+        agregarFrase("HACER PIS", "hacer pis");
+        agregarSinonimo("PIS", "hacer pis");
     }
+
+    /**
+     * Frases que no deben mapear a ningún picto real (evitar falsos positivos por prefijo).
+     * Más largas primero.
+     */
+    private static final String[] FRASES_SOLO_AUTOMATICAS = {
+            "DE LAS VECES",
+            "ALGUNAS VECES",
+            "MUCHAS VECES",
+            "POCAS VECES",
+            "A VECES",
+            "SE VA A",
+            "SE VA"
+    };
+
+    /** Palabras sueltas que siempre van a picto automático. */
+    private static final Set<String> PALABRAS_SOLO_AUTOMATICAS = new HashSet<>(Arrays.asList(
+            "VECES"
+    ));
 
     private ReglasPictosFrase() { }
 
@@ -161,6 +188,30 @@ public final class ReglasPictosFrase {
 
     static boolean esConector(String palabra) {
         return CONECTORES.contains(AlgoritmoPictosFrase.normalizar(palabra));
+    }
+
+    /**
+     * Palabras/frases que no deben resolverse a un picto real.
+     * @return cantidad de palabras consumidas, o 0 si no aplica.
+     */
+    static int consumirSoloAutomatico(String[] palabras, int indice) {
+        if (indice >= palabras.length) return 0;
+        for (String frase : FRASES_SOLO_AUTOMATICAS) {
+            String[] partes = frase.split("\\s+");
+            if (indice + partes.length > palabras.length) continue;
+            boolean coincide = true;
+            for (int j = 0; j < partes.length; j++) {
+                if (!partes[j].equals(AlgoritmoPictosFrase.normalizar(palabras[indice + j]))) {
+                    coincide = false;
+                    break;
+                }
+            }
+            if (coincide) return partes.length;
+        }
+        if (PALABRAS_SOLO_AUTOMATICAS.contains(AlgoritmoPictosFrase.normalizar(palabras[indice]))) {
+            return 1;
+        }
+        return 0;
     }
 
     /** Cuántas palabras consume un prefijo de negación empezando en {@code indice}, o 0 si no hay. */
@@ -210,14 +261,38 @@ public final class ReglasPictosFrase {
         String porStem = buscarArchivoPorStemExacto(pictos, baseNorm);
         if (porStem != null) return porStem;
         for (String archivo : pictos) {
+            if (esPictoRestringido(archivo)) continue;
             String nombre = AlgoritmoPictosFrase.normalizar(nombres.nombre(archivo));
             if (nombre.startsWith(baseNorm + " ")) return archivo;
         }
         for (String archivo : pictos) {
+            if (esPictoRestringido(archivo)) continue;
             String nombreArchivo = archivo.toLowerCase(Locale.ROOT);
             if (nombreArchivo.startsWith(base.toLowerCase(Locale.ROOT))) return archivo;
         }
         return null;
+    }
+
+    /** Pictos que no deben salir por prefijo/similitud: solo con palabra clave explícita. */
+    static boolean esPictoRestringido(String archivo) {
+        String stem = stemArchivoNormalizado(archivo);
+        return "HACER CACA".equals(stem) || "HACER PIS".equals(stem);
+    }
+
+    /** True si el segmento hablado autoriza usar ese picto restringido. */
+    static boolean segmentoPermitePictoRestringido(String segmentoNorm, String archivo) {
+        String stem = stemArchivoNormalizado(archivo);
+        if ("HACER CACA".equals(stem)) return contienePalabra(segmentoNorm, "CACA");
+        if ("HACER PIS".equals(stem)) return contienePalabra(segmentoNorm, "PIS");
+        return true;
+    }
+
+    private static boolean contienePalabra(String segmentoNorm, String palabra) {
+        if (segmentoNorm == null || segmentoNorm.isEmpty()) return false;
+        for (String parte : segmentoNorm.split("\\s+")) {
+            if (palabra.equals(parte)) return true;
+        }
+        return false;
     }
 
     /** Coincide solo con el nombre de archivo (sin extensión), no con prefijos parciales. */
