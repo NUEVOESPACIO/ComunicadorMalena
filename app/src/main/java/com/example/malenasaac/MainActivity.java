@@ -42,7 +42,9 @@ public class MainActivity extends Activity {
     /** Cantidad aproximada de pictos visibles a la vez en la solapa FRASES (el resto va con scroll). */
     private static final int PICTOS_VISIBLES_FRASE = 4;
     private static final int MAX_FRASES_PDF = 7;
-    private static final int MAX_PICTOS_JUEGO = 4;
+    private static final int MAX_PICTOS_JUEGO = 7;
+    /** Casillas visibles a la vez en la tarjeta de Pictos; el resto se alcanza deslizando. */
+    private static final int SLOTS_VISIBLES_JUEGO = 4;
     private static final int SEGUNDOS_MAX_ESCUCHA = 20;
     private static final int COLUMNAS_MOSAICO_JUEGO = 5;
     /** Tamaño máximo de decodificación para miniaturas de lista (70 dp). */
@@ -68,6 +70,9 @@ public class MainActivity extends Activity {
     private static final int FILTRO_AUDIO_CON = 1;
     private static final int FILTRO_AUDIO_SIN = 2;
     private static final String DIR = "pictos";
+    private static final String PREFS_USOS_JUEGO = "usos_pictos_juego";
+    private static final int PERMISO_MICRO_PICTOS = 52;
+    private static final int SEGUNDOS_MAX_ESCUCHA_PICTOS = 15;
     private static final int[] COLORES_PALABRAS = {0xffe3f4e8, 0xffe1f0fa, 0xfffff5c9, 0xffffe3ee};
     private static final int[] COLORES_FRASES = {0xffeee8fb, 0xffffeadb, 0xffdef3f1, 0xffe7edf9};
     /** Estilos visuales de teclas del teclado predictivo. */
@@ -77,6 +82,8 @@ public class MainActivity extends Activity {
     private static final int SOLAPA_PALABRAS = 0;
     private static final int SOLAPA_FRASES = 1;
     private static final int SOLAPA_JUEGO = 2;
+    /** Palabras y Frases siguen funcionando internamente; esto solo controla si se ven. */
+    private static final boolean MOSTRAR_PALABRAS_Y_FRASES = false;
     private LinearLayout contenido, lista, juegoPanel;
     private ScrollView scrollLista;
     private Button tabPalabras, tabFrases, tabJuego;
@@ -84,6 +91,7 @@ public class MainActivity extends Activity {
     private LinearLayout tecladoJuegoContenedor;
     private GridLayout mosaicoJuego;
     private LinearLayout tabEleccionJuego, slotsEleccionJuego;
+    private HorizontalScrollView scrollSlotsJuego;
     private Button botonEnviarJuego, botonDisyuncionJuego;
     private ImageButton botonReciclajeJuego;
     private final List<String> pictos = new ArrayList<>();
@@ -132,6 +140,16 @@ public class MainActivity extends Activity {
     private View overlayDisyuncion;
     private boolean eleccionDisyuncionHecha;
     private boolean animandoEleccionJuego;
+    private FrameLayout overlayVistaPrevia;
+    private final List<CoincidenciaPicto> colaVozJuego = new ArrayList<>();
+    private int totalColaVozJuego;
+    private ImageButton botonMicroJuego;
+    private SpeechRecognizer reconocedorPictos;
+    private boolean escuchandoPictos;
+    private String textoParcialPictos;
+    private AnimationDrawable animacionMicroPictos;
+    private final Runnable cortarEscuchaPictosRunnable = this::detenerEscuchaPictos;
+    private final Runnable fallbackEscuchaPictosRunnable = () -> finalizarEscuchaPictos(null);
     /** Archivo de catálogo → archivo real en la carpeta local (pictos propios). */
     private final Map<String, File> pictosLocales = new LinkedHashMap<>();
     private boolean modoEdicion;
@@ -178,10 +196,11 @@ public class MainActivity extends Activity {
     @Override protected void onCreate(Bundle state) {
         super.onCreate(state); cargarDatos(); crearVista(); mostrarJuego(); ocultarBarras();
         if (frasesDescartadasAlCargar > 0) {
-            Toast.makeText(this, "Se quitaron " + frasesDescartadasAlCargar + " frases con pictogramas que ya no existen.", Toast.LENGTH_LONG).show();
+            if (MOSTRAR_PALABRAS_Y_FRASES)
+                Toast.makeText(this, "Se quitaron " + frasesDescartadasAlCargar + " frases con pictogramas que ya no existen.", Toast.LENGTH_LONG).show();
             guardarRespaldo();
         }
-        if (esInstalacionNueva() && frases.isEmpty()) contenido.post(this::ofrecerRestauracion);
+        if (MOSTRAR_PALABRAS_Y_FRASES && esInstalacionNueva() && frases.isEmpty()) contenido.post(this::ofrecerRestauracion);
     }
     @Override protected void onResume() { super.onResume(); ocultarBarras(); }
     @Override protected void onPause() {
@@ -195,6 +214,7 @@ public class MainActivity extends Activity {
             reconocedorVoz.cancel();
         }
         if (escuchandoNombre) detenerEscuchaNombre();
+        cancelarEscuchaPictos();
         cancelarCountdownNombre();
         detenerGrabacionAudio(false);
         detenerReproduccionAudioPicto();
@@ -213,6 +233,8 @@ public class MainActivity extends Activity {
         if (dialogoGrabacion != null) { dialogoGrabacion.dismiss(); dialogoGrabacion = null; }
         if (reconocedorVoz != null) { reconocedorVoz.destroy(); reconocedorVoz = null; }
         if (reconocedorNombre != null) { reconocedorNombre.destroy(); reconocedorNombre = null; }
+        cancelarEscuchaPictos();
+        if (reconocedorPictos != null) { reconocedorPictos.destroy(); reconocedorPictos = null; }
         if (sonidoJuego != null) { sonidoJuego.release(); sonidoJuego = null; }
         if (sonidoDisyuncion != null) { sonidoDisyuncion.release(); sonidoDisyuncion = null; }
         handlerEscucha.removeCallbacks(entrarModoEdicionRunnable);
@@ -297,9 +319,13 @@ public class MainActivity extends Activity {
         LinearLayout tabs = new LinearLayout(this); tabs.setPadding(dp(10),dp(10),dp(10),dp(6));
         tabPalabras = tab("Palabras", v -> { if (!escuchandoVoz) mostrarPalabras(); });
         tabFrases = tab("Frases", v -> { if (!escuchandoVoz) mostrarFrases(); });
-        tabJuego = tab("Juego", v -> { if (!escuchandoVoz) mostrarJuego(); });
+        tabJuego = tab("Pictos", v -> { if (!escuchandoVoz) mostrarJuego(); });
         tabs.addView(tabPalabras, peso(1,-2,dp(2))); tabs.addView(tabFrases, peso(1,-2,dp(2)));
         tabs.addView(tabJuego, peso(1,-2,dp(2)));
+        if (!MOSTRAR_PALABRAS_Y_FRASES) {
+            tabPalabras.setVisibility(View.GONE);
+            tabFrases.setVisibility(View.GONE);
+        }
         tabEditar = tabIcono(android.R.drawable.ic_menu_edit, "Editar", null);
         configurarPulsacionLargaEditar();
         salir = tabIcono(android.R.drawable.ic_menu_close_clear_cancel, "Salir de la aplicación", v -> finishAffinity());
@@ -321,7 +347,11 @@ public class MainActivity extends Activity {
         tabEleccionJuego.setPadding(dp(8), dp(10), dp(8), dp(8)); tabEleccionJuego.setBackground(fondoPanel());
         slotsEleccionJuego = new LinearLayout(this); slotsEleccionJuego.setOrientation(LinearLayout.HORIZONTAL);
         slotsEleccionJuego.setGravity(Gravity.CENTER_VERTICAL);
-        tabEleccionJuego.addView(slotsEleccionJuego, new LinearLayout.LayoutParams(-1, -2));
+        scrollSlotsJuego = new HorizontalScrollView(this);
+        scrollSlotsJuego.setHorizontalScrollBarEnabled(true);
+        scrollSlotsJuego.setScrollbarFadingEnabled(false);
+        scrollSlotsJuego.addView(slotsEleccionJuego, new FrameLayout.LayoutParams(-2, -2));
+        tabEleccionJuego.addView(scrollSlotsJuego, new LinearLayout.LayoutParams(-1, -2));
         LinearLayout controlesJuego = new LinearLayout(this); controlesJuego.setOrientation(LinearLayout.HORIZONTAL);
         controlesJuego.setGravity(Gravity.CENTER_VERTICAL);
         LinearLayout.LayoutParams controlesParams = new LinearLayout.LayoutParams(-1, -2);
@@ -334,6 +364,15 @@ public class MainActivity extends Activity {
         LinearLayout.LayoutParams disParams = new LinearLayout.LayoutParams(dp(92), tamBoton);
         disParams.rightMargin = dp(4);
         controlesJuego.addView(botonDisyuncionJuego, disParams);
+        botonMicroJuego = new ImageButton(this);
+        botonMicroJuego.setBackground(fondoTecla(TECLA_NORMAL));
+        botonMicroJuego.setScaleType(ImageView.ScaleType.FIT_CENTER);
+        botonMicroJuego.setPadding(dp(4), dp(4), dp(4), dp(4));
+        botonMicroJuego.setOnClickListener(v -> alternarMicroPictos());
+        actualizarIconoMicroPictos(false);
+        LinearLayout.LayoutParams microParams = new LinearLayout.LayoutParams(tamBoton, tamBoton);
+        microParams.rightMargin = dp(4);
+        controlesJuego.addView(botonMicroJuego, microParams);
         botonEnviarJuego = tecla("", TECLA_NORMAL, v -> enviarJuego());
         botonEnviarJuego.setText(etiquetaPlay());
         botonEnviarJuego.setContentDescription("Reproducir frase");
@@ -1243,6 +1282,8 @@ public class MainActivity extends Activity {
     private void entrarModoEdicion() {
         if (escuchandoVoz || modoEdicion) return;
         modoEdicion = true;
+        cancelarEscuchaPictos();
+        colaVozJuego.clear();
         tabEditar.performHapticFeedback(HapticFeedbackConstants.LONG_PRESS);
         PictosLocales.carpeta(this);
         AudiosPictos.carpeta(this);
@@ -2372,6 +2413,15 @@ public class MainActivity extends Activity {
     }
 
     @Override public void onBackPressed() {
+        if (escuchandoPictos) {
+            cancelarEscuchaPictos();
+            return;
+        }
+        if (overlayVistaPrevia != null) {
+            colaVozJuego.clear();
+            cerrarVistaPreviaJuego();
+            return;
+        }
         if (modoEdicion) {
             guardarYSalirEdicion();
             return;
@@ -2484,12 +2534,12 @@ public class MainActivity extends Activity {
         ImageView img = imagen(archivo);
         celda.addView(img, new FrameLayout.LayoutParams(-1, -1));
         celda.setContentDescription("Elegir " + nombre(archivo));
-        celda.setOnClickListener(v -> animarEleccionJuego(archivo, v));
+        celda.setOnClickListener(v -> mostrarVistaPreviaJuego(archivo, v));
         return celda;
     }
 
     private int anchoUtilTabSlots() {
-        int ancho = slotsEleccionJuego.getWidth();
+        int ancho = scrollSlotsJuego.getWidth();
         if (ancho <= 0 && tabEleccionJuego.getWidth() > 0) {
             ancho = tabEleccionJuego.getWidth()
                     - tabEleccionJuego.getPaddingLeft() - tabEleccionJuego.getPaddingRight();
@@ -2500,7 +2550,7 @@ public class MainActivity extends Activity {
     }
 
     private int ladoSlotTab() {
-        return Math.max(dp(28), anchoUtilTabSlots() / MAX_PICTOS_JUEGO);
+        return Math.max(dp(28), anchoUtilTabSlots() / SLOTS_VISIBLES_JUEGO);
     }
 
     private void actualizarTabEleccionJuego() {
@@ -2515,13 +2565,14 @@ public class MainActivity extends Activity {
         ViewGroup.LayoutParams filaParams = slotsEleccionJuego.getLayoutParams();
         filaParams.height = lado;
         slotsEleccionJuego.setLayoutParams(filaParams);
-        slotsEleccionJuego.setWeightSum(MAX_PICTOS_JUEGO);
-        for (int i = 0; i < MAX_PICTOS_JUEGO; i++) {
+        int casillas = Math.min(MAX_PICTOS_JUEGO, Math.max(SLOTS_VISIBLES_JUEGO, seleccionJuego.size() + 1));
+        for (int i = 0; i < casillas; i++) {
             View slot = i < seleccionJuego.size()
-                    ? slotPictoJuego(seleccionJuego.get(i))
-                    : slotVacioJuego();
-            slotsEleccionJuego.addView(slot, new LinearLayout.LayoutParams(0, lado, 1f));
+                    ? slotPictoJuego(seleccionJuego.get(i), i + 1)
+                    : slotVacioJuego(i + 1, lado);
+            slotsEleccionJuego.addView(slot, new LinearLayout.LayoutParams(lado, lado));
         }
+        scrollSlotsJuego.post(() -> scrollSlotsJuego.smoothScrollTo(slotsEleccionJuego.getWidth(), 0));
         boolean haySeleccion = !seleccionJuego.isEmpty();
         botonReciclajeJuego.setEnabled(haySeleccion);
         botonReciclajeJuego.setAlpha(haySeleccion ? 1f : .35f);
@@ -2530,21 +2581,37 @@ public class MainActivity extends Activity {
         botonDisyuncionJuego.setVisibility(seleccionJuego.size() == 2 ? View.VISIBLE : View.GONE);
     }
 
-    private View slotVacioJuego() {
-        View vacio = new View(this);
+    private View slotVacioJuego(int numero, int lado) {
+        FrameLayout vacio = new FrameLayout(this);
         GradientDrawable fondo = new GradientDrawable();
         fondo.setColor(0x33ffffff);
         fondo.setCornerRadius(dp(10));
         fondo.setStroke(dp(2), 0x668195a5);
         vacio.setBackground(fondo);
+        TextView texto = new TextView(this);
+        texto.setText(String.valueOf(numero));
+        texto.setTextColor(0x7790a4ae);
+        texto.setTypeface(Typeface.DEFAULT_BOLD);
+        texto.setTextSize(TypedValue.COMPLEX_UNIT_PX, lado * 0.45f);
+        texto.setGravity(Gravity.CENTER);
+        texto.setIncludeFontPadding(false);
+        vacio.addView(texto, new FrameLayout.LayoutParams(-1, -1));
         return vacio;
     }
 
-    private View slotPictoJuego(PhraseRecord.Item item) {
+    private View slotPictoJuego(PhraseRecord.Item item, int numero) {
         FrameLayout caja = new FrameLayout(this);
         caja.setClipChildren(true);
         ImageView img = imagen(item.archivo);
         caja.addView(img, new FrameLayout.LayoutParams(-1, -1));
+        TextView posicion = new TextView(this);
+        posicion.setText(String.valueOf(numero));
+        posicion.setTextColor(0x9990a4ae);
+        posicion.setTypeface(Typeface.DEFAULT_BOLD);
+        posicion.setTextSize(TypedValue.COMPLEX_UNIT_SP, 11);
+        FrameLayout.LayoutParams pp = new FrameLayout.LayoutParams(-2, -2, Gravity.TOP | Gravity.START);
+        pp.setMargins(dp(6), dp(3), 0, 0);
+        caja.addView(posicion, pp);
         View raya = new View(this);
         raya.setBackgroundColor(0xccb00020);
         raya.setVisibility(item.negado ? View.VISIBLE : View.GONE);
@@ -2560,16 +2627,222 @@ public class MainActivity extends Activity {
         return caja;
     }
 
-    private void animarEleccionJuego(String archivo, View origen) {
+    private void mostrarVistaPreviaJuego(String archivo, View origen) {
+        abrirVistaPreviaJuego(Collections.singletonList(archivo), 0, false, origen, null);
+    }
+
+    /**
+     * Amplía el picto al 50% del ancho para confirmarlo (OK) o descartarlo (NO) antes de enviarlo a la tarjeta.
+     * Con más de una opción (variantes del mismo nombre) muestra − / + para cambiar de imagen.
+     * Sin origen, el picto aparece creciendo desde el centro.
+     */
+    private void abrirVistaPreviaJuego(List<String> opciones, int indiceInicial, boolean negado,
+                                       View origen, String progreso) {
+        if (animandoEleccionJuego || overlayVistaPrevia != null || opciones.isEmpty()) return;
+        if (seleccionJuego.size() >= MAX_PICTOS_JUEGO) {
+            Toast.makeText(this, "Podés seleccionar hasta " + MAX_PICTOS_JUEGO + " pictogramas.", Toast.LENGTH_SHORT).show();
+            colaVozJuego.clear();
+            return;
+        }
+        FrameLayout raiz = (FrameLayout) contenido.getParent();
+        int anchoPantalla = raiz.getWidth() > 0 ? raiz.getWidth() : getResources().getDisplayMetrics().widthPixels;
+        int lado = anchoPantalla / 2;
+        final int[] indice = { Math.max(0, Math.min(indiceInicial, opciones.size() - 1)) };
+
+        FrameLayout overlay = new FrameLayout(this);
+        overlay.setBackgroundColor(0x99000000);
+        overlay.setElevation(dp(10));
+        overlay.setOnClickListener(v -> cerrarVistaPreviaJuego());
+
+        LinearLayout caja = new LinearLayout(this);
+        caja.setOrientation(LinearLayout.VERTICAL);
+        caja.setGravity(Gravity.CENTER_HORIZONTAL);
+        caja.setClickable(true);
+
+        if (progreso != null) {
+            TextView textoProgreso = new TextView(this);
+            textoProgreso.setText(progreso);
+            textoProgreso.setTextColor(Color.WHITE);
+            textoProgreso.setTextSize(TypedValue.COMPLEX_UNIT_SP, 18);
+            textoProgreso.setTypeface(Typeface.DEFAULT_BOLD);
+            LinearLayout.LayoutParams pp = new LinearLayout.LayoutParams(-2, -2);
+            pp.bottomMargin = dp(10);
+            caja.addView(textoProgreso, pp);
+        }
+
+        LinearLayout filaImagen = new LinearLayout(this);
+        filaImagen.setOrientation(LinearLayout.HORIZONTAL);
+        filaImagen.setGravity(Gravity.CENTER_VERTICAL);
+
+        FrameLayout marco = new FrameLayout(this);
+        ImageView img = imagenGrande(opciones.get(indice[0]));
+        marco.addView(img, new FrameLayout.LayoutParams(-1, -1));
+        View raya = new View(this);
+        raya.setBackgroundColor(0xccb00020);
+        raya.setVisibility(negado ? View.VISIBLE : View.GONE);
+        FrameLayout.LayoutParams pr = new FrameLayout.LayoutParams(-1, dp(8), Gravity.CENTER);
+        pr.setMargins(dp(4), 0, dp(4), 0);
+        marco.addView(raya, pr);
+
+        TextView textoVariante = new TextView(this);
+        textoVariante.setTextColor(Color.WHITE);
+        textoVariante.setTextSize(TypedValue.COMPLEX_UNIT_SP, 14);
+        Runnable mostrarOpcion = () -> {
+            String actual = opciones.get(indice[0]);
+            Bitmap bitmap = decodificarPicto(actual, TAM_PICTO_REPRODUCCION);
+            if (bitmap != null) img.setImageBitmap(bitmap);
+            img.setContentDescription(nombre(actual));
+            textoVariante.setText((indice[0] + 1) + " de " + opciones.size());
+        };
+        boolean hayVariantes = opciones.size() > 1;
+        if (hayVariantes) {
+            Button menos = botonVariante("\u2212");
+            menos.setContentDescription("Imagen anterior");
+            menos.setOnClickListener(v -> {
+                indice[0] = (indice[0] - 1 + opciones.size()) % opciones.size();
+                mostrarOpcion.run();
+            });
+            filaImagen.addView(menos, fijo(dp(44), dp(44), dp(8)));
+        }
+        filaImagen.addView(marco, new LinearLayout.LayoutParams(lado, lado));
+        if (hayVariantes) {
+            Button mas = botonVariante("+");
+            mas.setContentDescription("Imagen siguiente");
+            mas.setOnClickListener(v -> {
+                indice[0] = (indice[0] + 1) % opciones.size();
+                mostrarOpcion.run();
+            });
+            filaImagen.addView(mas, fijo(dp(44), dp(44), dp(8)));
+        }
+        caja.addView(filaImagen, new LinearLayout.LayoutParams(-2, -2));
+        if (hayVariantes) {
+            mostrarOpcion.run();
+            LinearLayout.LayoutParams vp = new LinearLayout.LayoutParams(-2, -2);
+            vp.topMargin = dp(6);
+            caja.addView(textoVariante, vp);
+        }
+
+        LinearLayout botones = new LinearLayout(this);
+        botones.setOrientation(LinearLayout.HORIZONTAL);
+        botones.setGravity(Gravity.CENTER);
+        Button ok = botonVistaPrevia("\u2714 OK", 0xff2e7d32);
+        ok.setContentDescription("Aceptar");
+        ok.setOnClickListener(v -> {
+            if (overlayVistaPrevia != overlay) return;
+            overlayVistaPrevia = null;
+            animarEleccionJuego(opciones.get(indice[0]), negado, marco);
+            raiz.removeView(overlay);
+        });
+        Button no = botonVistaPrevia("\u2716 NO", 0xffc62828);
+        no.setContentDescription("Descartar");
+        no.setOnClickListener(v -> cerrarVistaPreviaJuego());
+        int anchoBoton = Math.max(dp(96), lado / 2 - dp(8));
+        botones.addView(ok, fijo(anchoBoton, dp(56), dp(6)));
+        botones.addView(no, fijo(anchoBoton, dp(56), dp(6)));
+        LinearLayout.LayoutParams botonesParams = new LinearLayout.LayoutParams(-2, -2);
+        botonesParams.topMargin = dp(16);
+        caja.addView(botones, botonesParams);
+
+        overlay.addView(caja, new FrameLayout.LayoutParams(-2, -2, Gravity.CENTER));
+        overlayVistaPrevia = overlay;
+        raiz.addView(overlay, new FrameLayout.LayoutParams(-1, -1));
+
+        overlay.setAlpha(0f);
+        overlay.animate().alpha(1f).setDuration(180).start();
+        marco.post(() -> {
+            if (origen != null) {
+                int[] locOrigen = new int[2], locMarco = new int[2];
+                origen.getLocationOnScreen(locOrigen);
+                marco.getLocationOnScreen(locMarco);
+                float escala = Math.max(1, Math.min(origen.getWidth(), origen.getHeight())) / (float) lado;
+                marco.setTranslationX((locOrigen[0] + origen.getWidth() / 2f) - (locMarco[0] + lado / 2f));
+                marco.setTranslationY((locOrigen[1] + origen.getHeight() / 2f) - (locMarco[1] + lado / 2f));
+                marco.setScaleX(escala);
+                marco.setScaleY(escala);
+            } else {
+                marco.setScaleX(0.3f);
+                marco.setScaleY(0.3f);
+            }
+            marco.animate().translationX(0).translationY(0).scaleX(1f).scaleY(1f)
+                    .setDuration(240).setInterpolator(new DecelerateInterpolator()).start();
+        });
+    }
+
+    private void cerrarVistaPreviaJuego() {
+        FrameLayout overlay = overlayVistaPrevia;
+        if (overlay == null) return;
+        overlayVistaPrevia = null;
+        overlay.animate().alpha(0f).setDuration(150).withEndAction(() -> {
+            ViewParent padre = overlay.getParent();
+            if (padre instanceof ViewGroup) ((ViewGroup) padre).removeView(overlay);
+            continuarColaVozJuego();
+        }).start();
+    }
+
+    private Button botonVariante(String texto) {
+        Button b = new Button(this);
+        b.setText(texto);
+        b.setAllCaps(false);
+        b.setTextSize(TypedValue.COMPLEX_UNIT_SP, 22);
+        b.setTypeface(Typeface.DEFAULT_BOLD);
+        b.setTextColor(0xff263238);
+        b.setPadding(0, 0, 0, 0);
+        b.setGravity(Gravity.CENTER);
+        GradientDrawable f = new GradientDrawable();
+        f.setShape(GradientDrawable.OVAL);
+        f.setColor(Color.WHITE);
+        f.setStroke(dp(2), 0xff718596);
+        b.setBackground(f);
+        return b;
+    }
+
+    /** Muestra el siguiente picto reconocido por voz, si quedan y no hay otra vista abierta. */
+    private void continuarColaVozJuego() {
+        if (colaVozJuego.isEmpty() || overlayVistaPrevia != null || animandoEleccionJuego) return;
+        if (solapaActual != SOLAPA_JUEGO || modoEdicion) { colaVozJuego.clear(); return; }
+        if (seleccionJuego.size() >= MAX_PICTOS_JUEGO) {
+            Toast.makeText(this, "La tarjeta está completa (" + MAX_PICTOS_JUEGO + " pictogramas).", Toast.LENGTH_SHORT).show();
+            colaVozJuego.clear();
+            return;
+        }
+        CoincidenciaPicto siguiente = colaVozJuego.remove(0);
+        int numero = totalColaVozJuego - colaVozJuego.size();
+        String progreso = totalColaVozJuego > 1 ? numero + " de " + totalColaVozJuego : null;
+        List<String> opciones = variantesDe(siguiente.archivo);
+        if (opciones.isEmpty()) opciones = Collections.singletonList(siguiente.archivo);
+        int indice = Math.max(0, opciones.indexOf(varianteMasUsada(siguiente.archivo)));
+        abrirVistaPreviaJuego(opciones, indice, siguiente.negado, null, progreso);
+    }
+
+    private Button botonVistaPrevia(String texto, int color) {
+        Button b = new Button(this);
+        b.setText(texto);
+        b.setAllCaps(false);
+        b.setTextSize(TypedValue.COMPLEX_UNIT_SP, 20);
+        b.setTypeface(Typeface.DEFAULT_BOLD);
+        b.setTextColor(color);
+        GradientDrawable f = new GradientDrawable();
+        f.setColor(Color.WHITE);
+        f.setCornerRadius(dp(12));
+        f.setStroke(dp(3), color);
+        b.setBackground(f);
+        b.setPadding(dp(8), 0, dp(8), 0);
+        return b;
+    }
+
+    private void animarEleccionJuego(String archivo, boolean negado, View origen) {
         if (animandoEleccionJuego) return;
         if (seleccionJuego.size() >= MAX_PICTOS_JUEGO) {
-            Toast.makeText(this, "Podés seleccionar hasta 4 pictogramas.", Toast.LENGTH_SHORT).show();
+            Toast.makeText(this, "Podés seleccionar hasta " + MAX_PICTOS_JUEGO + " pictogramas.", Toast.LENGTH_SHORT).show();
+            colaVozJuego.clear();
             return;
         }
         int indiceDestino = seleccionJuego.size();
         View destino = slotsEleccionJuego.getChildAt(indiceDestino);
-        if (destino == null) return;
+        if (destino == null) { colaVozJuego.clear(); return; }
         animandoEleccionJuego = true;
+        int scrollNecesario = destino.getRight() - scrollSlotsJuego.getWidth();
+        if (scrollNecesario > scrollSlotsJuego.getScrollX()) scrollSlotsJuego.scrollTo(scrollNecesario, 0);
         int lado = destino.getWidth() > 0 ? destino.getWidth() : ladoSlotTab();
         int anchoOrigen = origen.getWidth();
         int altoOrigen = origen.getHeight();
@@ -2580,24 +2853,162 @@ public class MainActivity extends Activity {
         raiz.getLocationOnScreen(locRaiz);
         if (!filtroTecladoJuego.isEmpty()) liberarFiltroJuego();
         FrameLayout copia = new FrameLayout(this);
-        copia.setElevation(dp(8));
+        copia.setElevation(dp(12));
         ImageView img = imagen(archivo);
         copia.addView(img, new FrameLayout.LayoutParams(-1, -1));
         FrameLayout.LayoutParams lp = new FrameLayout.LayoutParams(lado, lado);
         lp.leftMargin = locOrigen[0] - locRaiz[0] + (anchoOrigen - lado) / 2;
         lp.topMargin = locOrigen[1] - locRaiz[1] + (altoOrigen - lado) / 2;
         raiz.addView(copia, lp);
+        float escalaInicial = Math.max(1, Math.min(anchoOrigen, altoOrigen)) / (float) lado;
+        copia.setScaleX(escalaInicial);
+        copia.setScaleY(escalaInicial);
         sonidoEleccionJuego();
-        float dx = locDestino[0] - locOrigen[0] + (destino.getWidth() - lado) / 2;
-        float dy = locDestino[1] - locOrigen[1] + (destino.getHeight() - lado) / 2;
-        copia.animate().translationX(dx).translationY(dy).setDuration(320)
+        float dx = (locDestino[0] + destino.getWidth() / 2f) - (locOrigen[0] + anchoOrigen / 2f);
+        float dy = (locDestino[1] + destino.getHeight() / 2f) - (locOrigen[1] + altoOrigen / 2f);
+        copia.animate().translationX(dx).translationY(dy).scaleX(1f).scaleY(1f).setDuration(320)
                 .setInterpolator(new DecelerateInterpolator())
                 .withEndAction(() -> {
                     raiz.removeView(copia);
-                    seleccionJuego.add(new PhraseRecord.Item(archivo, false));
+                    seleccionJuego.add(new PhraseRecord.Item(archivo, negado));
+                    registrarUsoJuego(archivo);
                     actualizarTabEleccionJuego();
                     animandoEleccionJuego = false;
+                    tabEleccionJuego.post(this::continuarColaVozJuego);
                 }).start();
+    }
+
+    private void alternarMicroPictos() {
+        if (escuchandoPictos) { detenerEscuchaPictos(); return; }
+        if (overlayVistaPrevia != null || animandoEleccionJuego || escuchandoVoz) return;
+        if (!SpeechRecognizer.isRecognitionAvailable(this)) {
+            Toast.makeText(this, "Reconocimiento de voz no disponible.", Toast.LENGTH_SHORT).show();
+            return;
+        }
+        if (checkSelfPermission(android.Manifest.permission.RECORD_AUDIO) != PackageManager.PERMISSION_GRANTED) {
+            requestPermissions(new String[]{android.Manifest.permission.RECORD_AUDIO}, PERMISO_MICRO_PICTOS);
+            return;
+        }
+        iniciarEscuchaPictos();
+    }
+
+    private void iniciarEscuchaPictos() {
+        if (reconocedorPictos == null) {
+            reconocedorPictos = SpeechRecognizer.createSpeechRecognizer(this);
+            reconocedorPictos.setRecognitionListener(new RecognitionListener() {
+                @Override public void onReadyForSpeech(Bundle params) { }
+                @Override public void onBeginningOfSpeech() { }
+                @Override public void onRmsChanged(float rmsdB) {
+                    runOnUiThread(() -> {
+                        if (!escuchandoPictos || botonMicroJuego == null) return;
+                        float escala = 1f + Math.max(0f, rmsdB) / 12f * 0.18f;
+                        botonMicroJuego.setScaleX(escala);
+                        botonMicroJuego.setScaleY(escala);
+                    });
+                }
+                @Override public void onBufferReceived(byte[] buffer) { }
+                @Override public void onEndOfSpeech() { }
+                @Override public void onPartialResults(Bundle partialResults) {
+                    String parcial = primerResultado(partialResults);
+                    if (parcial != null && !parcial.trim().isEmpty()) textoParcialPictos = parcial;
+                }
+                @Override public void onEvent(int eventType, Bundle params) { }
+                @Override public void onError(int error) {
+                    runOnUiThread(() -> finalizarEscuchaPictos(null));
+                }
+                @Override public void onResults(Bundle results) {
+                    String texto = primerResultado(results);
+                    runOnUiThread(() -> finalizarEscuchaPictos(texto));
+                }
+            });
+        }
+        colaVozJuego.clear();
+        textoParcialPictos = null;
+        escuchandoPictos = true;
+        silenciarBeepsReconocedor();
+        actualizarIconoMicroPictos(true);
+        handlerEscucha.postDelayed(cortarEscuchaPictosRunnable, SEGUNDOS_MAX_ESCUCHA_PICTOS * 1000L);
+        try {
+            reconocedorPictos.startListening(intentEscuchaNombre());
+        } catch (RuntimeException e) {
+            finalizarEscuchaPictos(null);
+        }
+    }
+
+    /** Corta la escucha; el resultado llega por onResults o, si el motor no responde, por el fallback. */
+    private void detenerEscuchaPictos() {
+        if (!escuchandoPictos) return;
+        handlerEscucha.removeCallbacks(cortarEscuchaPictosRunnable);
+        try { reconocedorPictos.stopListening(); } catch (RuntimeException ignored) { }
+        handlerEscucha.removeCallbacks(fallbackEscuchaPictosRunnable);
+        handlerEscucha.postDelayed(fallbackEscuchaPictosRunnable, 1500);
+    }
+
+    private void cancelarEscuchaPictos() {
+        if (!escuchandoPictos) return;
+        escuchandoPictos = false;
+        handlerEscucha.removeCallbacks(cortarEscuchaPictosRunnable);
+        handlerEscucha.removeCallbacks(fallbackEscuchaPictosRunnable);
+        try { reconocedorPictos.cancel(); } catch (RuntimeException ignored) { }
+        restaurarBeepsReconocedor();
+        actualizarIconoMicroPictos(false);
+        textoParcialPictos = null;
+    }
+
+    private void finalizarEscuchaPictos(String texto) {
+        if (!escuchandoPictos) return;
+        escuchandoPictos = false;
+        handlerEscucha.removeCallbacks(cortarEscuchaPictosRunnable);
+        handlerEscucha.removeCallbacks(fallbackEscuchaPictosRunnable);
+        restaurarBeepsReconocedor();
+        actualizarIconoMicroPictos(false);
+        if (texto == null || texto.trim().isEmpty()) texto = textoParcialPictos;
+        textoParcialPictos = null;
+        if (texto == null || texto.trim().isEmpty()) {
+            Toast.makeText(this, "No se escuchó nada.", Toast.LENGTH_SHORT).show();
+            return;
+        }
+        colaVozJuego.clear();
+        for (CoincidenciaPicto c : AlgoritmoPictosFrase.coincidencias(texto, catalogoBuscable, this::nombre)) {
+            if (!c.automatico && c.archivo != null && !c.archivo.isEmpty()) colaVozJuego.add(c);
+        }
+        if (colaVozJuego.isEmpty()) {
+            Toast.makeText(this, "No encontré pictos para: \"" + texto.trim() + "\"", Toast.LENGTH_LONG).show();
+            return;
+        }
+        int libres = MAX_PICTOS_JUEGO - seleccionJuego.size();
+        if (libres <= 0) {
+            Toast.makeText(this, "La tarjeta está completa (" + MAX_PICTOS_JUEGO + " pictogramas).", Toast.LENGTH_SHORT).show();
+            colaVozJuego.clear();
+            return;
+        }
+        while (colaVozJuego.size() > libres) colaVozJuego.remove(colaVozJuego.size() - 1);
+        totalColaVozJuego = colaVozJuego.size();
+        continuarColaVozJuego();
+    }
+
+    private void actualizarIconoMicroPictos(boolean escuchando) {
+        if (botonMicroJuego == null) return;
+        if (animacionMicroPictos != null) {
+            animacionMicroPictos.stop();
+            animacionMicroPictos = null;
+        }
+        botonMicroJuego.setScaleX(1f);
+        botonMicroJuego.setScaleY(1f);
+        if (escuchando) {
+            Drawable anim = getResources().getDrawable(R.drawable.anim_escucha, getTheme());
+            botonMicroJuego.setImageDrawable(anim);
+            if (anim instanceof AnimationDrawable) {
+                animacionMicroPictos = (AnimationDrawable) anim;
+                animacionMicroPictos.start();
+            }
+        } else {
+            Drawable icono = getResources().getDrawable(android.R.drawable.ic_btn_speak_now, getTheme()).mutate();
+            icono.setTint(0xff263238);
+            botonMicroJuego.setImageDrawable(icono);
+        }
+        botonMicroJuego.setBackground(fondoTecla(escuchando ? TECLA_PULSADA : TECLA_NORMAL));
+        botonMicroJuego.setContentDescription(escuchando ? "Terminar de escuchar" : "Decir pictos con la voz");
     }
 
     private void sonidoEleccionJuego() {
@@ -3553,6 +3964,10 @@ public class MainActivity extends Activity {
             if (resultados[0] == PackageManager.PERMISSION_GRANTED) exportarAudiosPublicos();
             else Toast.makeText(this, "Se necesita permiso de almacenamiento.", Toast.LENGTH_SHORT).show();
         }
+        if (codigo == PERMISO_MICRO_PICTOS) {
+            if (resultados[0] == PackageManager.PERMISSION_GRANTED) iniciarEscuchaPictos();
+            else Toast.makeText(this, "Se necesita permiso de micrófono.", Toast.LENGTH_SHORT).show();
+        }
         if (codigo == PERMISO_EXPORT_PICTOS) {
             if (resultados[0] == PackageManager.PERMISSION_GRANTED) exportarPictosPublicos();
             else Toast.makeText(this, "Se necesita permiso de almacenamiento.", Toast.LENGTH_SHORT).show();
@@ -3647,15 +4062,24 @@ public class MainActivity extends Activity {
         return variantes;
     }
 
-    /** Entre variantes del mismo nombre, la más usada en frases; si empatan, la sin (2)/(3). */
+    private int usosJuego(String archivo) {
+        return getSharedPreferences(PREFS_USOS_JUEGO, MODE_PRIVATE).getInt(archivo, 0);
+    }
+
+    private void registrarUsoJuego(String archivo) {
+        SharedPreferences prefs = getSharedPreferences(PREFS_USOS_JUEGO, MODE_PRIVATE);
+        prefs.edit().putInt(archivo, prefs.getInt(archivo, 0) + 1).apply();
+    }
+
+    /** Entre variantes del mismo nombre, la más usada (frases + tarjeta de Pictos); si empatan, la sin (2)/(3). */
     private String varianteMasUsada(String archivo) {
         List<String> variantes = variantesDe(archivo);
         if (variantes.isEmpty()) return archivo;
         String mejor = variantes.get(0);
-        int maxUsos = usosEnFrases(mejor);
+        int maxUsos = usosEnFrases(mejor) + usosJuego(mejor);
         for (int i = 1; i < variantes.size(); i++) {
             String candidato = variantes.get(i);
-            int usos = usosEnFrases(candidato);
+            int usos = usosEnFrases(candidato) + usosJuego(candidato);
             if (usos > maxUsos) {
                 maxUsos = usos;
                 mejor = candidato;
