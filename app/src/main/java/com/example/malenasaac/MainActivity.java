@@ -4,19 +4,26 @@ import android.animation.*;
 import android.app.*;
 import android.content.*;
 import android.content.pm.PackageManager;
+import android.content.pm.ResolveInfo;
 import android.graphics.*;
 import android.graphics.drawable.Drawable;
 import android.graphics.drawable.AnimationDrawable;
 import android.graphics.drawable.GradientDrawable;
 import android.media.AudioManager;
+import android.media.MediaPlayer;
+import android.media.MediaRecorder;
 import android.media.ToneGenerator;
 import android.net.Uri;
 import android.os.*;
 import android.speech.RecognitionListener;
 import android.speech.RecognizerIntent;
 import android.speech.SpeechRecognizer;
+import android.provider.MediaStore;
 import android.util.LruCache;
 import android.util.TypedValue;
+import android.view.inputmethod.EditorInfo;
+import android.view.inputmethod.InputMethodManager;
+import androidx.core.content.FileProvider;
 import android.text.SpannableStringBuilder;
 import android.text.Spanned;
 import android.text.TextPaint;
@@ -45,6 +52,21 @@ public class MainActivity extends Activity {
     private static final int ELEGIR_RESPALDO = 41;
     private static final int PERMISO_DESCARGAS = 42;
     private static final int PERMISO_MICRO = 43;
+    private static final int ELEGIR_FOTO = 44;
+    private static final int TOMAR_FOTO = 45;
+    private static final int PERMISO_CAMARA = 46;
+    private static final int PERMISO_MICRO_NOMBRE = 47;
+    private static final int RECORTAR_FOTO = 48;
+    private static final int PERMISO_MICRO_AUDIO = 49;
+    private static final int PERMISO_EXPORT_AUDIOS = 50;
+    private static final int PERMISO_EXPORT_PICTOS = 51;
+    private static final int SEGUNDOS_MAX_NOMBRE = 5;
+    private static final int SEGUNDOS_MAX_GRABACION = 8;
+    private static final long MS_MODO_EDICION = 5000L;
+    private static final long MS_ACCESO_AUDIO = 5000L;
+    private static final int FILTRO_AUDIO_TODOS = 0;
+    private static final int FILTRO_AUDIO_CON = 1;
+    private static final int FILTRO_AUDIO_SIN = 2;
     private static final String DIR = "pictos";
     private static final int[] COLORES_PALABRAS = {0xffe3f4e8, 0xffe1f0fa, 0xfffff5c9, 0xffffe3ee};
     private static final int[] COLORES_FRASES = {0xffeee8fb, 0xffffeadb, 0xffdef3f1, 0xffe7edf9};
@@ -58,20 +80,23 @@ public class MainActivity extends Activity {
     private LinearLayout contenido, lista, juegoPanel;
     private ScrollView scrollLista;
     private Button tabPalabras, tabFrases, tabJuego;
-    private ImageButton salir;
+    private ImageButton tabEditar, salir;
+    private LinearLayout tecladoJuegoContenedor;
     private GridLayout mosaicoJuego;
     private LinearLayout tabEleccionJuego, slotsEleccionJuego;
-    private Button botonEnviarJuego;
+    private Button botonEnviarJuego, botonDisyuncionJuego;
     private ImageButton botonReciclajeJuego;
     private final List<String> pictos = new ArrayList<>();
     private final List<PhraseRecord> frases = new ArrayList<>();
     /** Frases marcadas para PDF; el orden de selección define la secuencia 1..N. */
     private final List<PhraseRecord> frasesSeleccionadas = new ArrayList<>();
     private final List<PhraseRecord.Item> borrador = new ArrayList<>();
-    private int solapaActual = SOLAPA_PALABRAS;
+    private int solapaActual = SOLAPA_JUEGO;
     private int frasesDescartadasAlCargar;
     /** Prefijo elegido en el teclado predictivo de pictogramas. */
     private String filtroTeclado = "";
+    /** Prefijo del teclado predictivo en la solapa Juego. */
+    private String filtroTecladoJuego = "";
     /** Catálogo de pictos buscables, precalculado al iniciar. */
     private final List<String> catalogoBuscable = new ArrayList<>();
     /** Nombres visibles cacheados por archivo. */
@@ -88,6 +113,7 @@ public class MainActivity extends Activity {
     private AnimationDrawable animacionMicro;
     private final List<PhraseRecord.Item> seleccionJuego = new ArrayList<>();
     private ToneGenerator sonidoJuego;
+    private MediaPlayer sonidoDisyuncion;
     /** Evita cerrar/sonar dos veces si el corte dispara varios callbacks. */
     private boolean avisoCorteEscuchaEmitido;
     private int volumenNotificacionPrevio = -1;
@@ -103,10 +129,54 @@ public class MainActivity extends Activity {
     private Runnable countdownEscucha;
     private int segundosRestantesEscucha;
     private View overlayConstruyendo;
+    private View overlayDisyuncion;
+    private boolean eleccionDisyuncionHecha;
     private boolean animandoEleccionJuego;
+    /** Archivo de catálogo → archivo real en la carpeta local (pictos propios). */
+    private final Map<String, File> pictosLocales = new LinkedHashMap<>();
+    private boolean modoEdicion;
+    private LinearLayout panelEdicion;
+    private LinearLayout listaPictosEdicion;
+    private ScrollView scrollEdicion;
+    private LinearLayout filaControlesEdicion;
+    private LinearLayout cajaPendienteEdicion;
+    private LinearLayout cajaAccionesFotoEdicion;
+    private LinearLayout cajaRecorteEdicion;
+    private RecorteFotoVista vistaRecorteEdicion;
+    private ImageView imagenPendienteEdicion;
+    private ImageView imagenPreviewEdicion;
+    private EditText nombrePendienteEdicion;
+    private Button botonOkPendienteEdicion;
+    private ImageButton botonCamaraEdicion;
+    private LinearLayout botonMicroEdicionCaja;
+    private ImageButton botonMicroEdicion;
+    private TextView textoCountdownNombre;
+    private Bitmap bitmapPendienteEdicion;
+    private Uri uriFotoCamara;
+    private Uri uriFotoRecorte;
+    private SpeechRecognizer reconocedorNombre;
+    private boolean escuchandoNombre;
+    private AnimationDrawable animacionMicroNombre;
+    private Runnable countdownNombre;
+    private int segundosRestantesNombre;
+    private final Runnable entrarModoEdicionRunnable = this::entrarModoEdicion;
+    /** Gestión de audios por picto (acceso con "!" 5 s dentro de modo edición). */
+    private boolean modoAudioPictos;
+    private LinearLayout panelAudioPictos;
+    private LinearLayout listaAudioPictos;
+    private Button botonAccesoAudio;
+    private int filtroAudioPictos = FILTRO_AUDIO_TODOS;
+    private MediaPlayer playerAudioPicto;
+    private MediaRecorder grabadorAudio;
+    private String pictoPendienteGrabar;
+    private String pictoGrabando;
+    private AlertDialog dialogoGrabacion;
+    private Runnable countdownGrabacion;
+    private int segundosRestantesGrabacion;
+    private final Runnable entrarGestionAudioRunnable = this::entrarGestionAudio;
 
     @Override protected void onCreate(Bundle state) {
-        super.onCreate(state); cargarDatos(); crearVista(); mostrarPalabras(); ocultarBarras();
+        super.onCreate(state); cargarDatos(); crearVista(); mostrarJuego(); ocultarBarras();
         if (frasesDescartadasAlCargar > 0) {
             Toast.makeText(this, "Se quitaron " + frasesDescartadasAlCargar + " frases con pictogramas que ya no existen.", Toast.LENGTH_LONG).show();
             guardarRespaldo();
@@ -124,6 +194,12 @@ public class MainActivity extends Activity {
             actualizarIconoMicro(false);
             reconocedorVoz.cancel();
         }
+        if (escuchandoNombre) detenerEscuchaNombre();
+        cancelarCountdownNombre();
+        detenerGrabacionAudio(false);
+        detenerReproduccionAudioPicto();
+        handlerEscucha.removeCallbacks(entrarModoEdicionRunnable);
+        handlerEscucha.removeCallbacks(entrarGestionAudioRunnable);
         super.onPause();
     }
     @Override protected void onDestroy() {
@@ -131,30 +207,58 @@ public class MainActivity extends Activity {
         cancelarFallbackProcesarEscucha();
         restaurarBeepsReconocedor();
         ocultarOverlayConstruyendo();
+        cerrarDisyuncion(false);
+        detenerGrabacionAudio(false);
+        detenerReproduccionAudioPicto();
+        if (dialogoGrabacion != null) { dialogoGrabacion.dismiss(); dialogoGrabacion = null; }
         if (reconocedorVoz != null) { reconocedorVoz.destroy(); reconocedorVoz = null; }
+        if (reconocedorNombre != null) { reconocedorNombre.destroy(); reconocedorNombre = null; }
         if (sonidoJuego != null) { sonidoJuego.release(); sonidoJuego = null; }
+        if (sonidoDisyuncion != null) { sonidoDisyuncion.release(); sonidoDisyuncion = null; }
+        handlerEscucha.removeCallbacks(entrarModoEdicionRunnable);
+        handlerEscucha.removeCallbacks(entrarGestionAudioRunnable);
         super.onDestroy();
     }
     @Override public void onWindowFocusChanged(boolean foco) { super.onWindowFocusChanged(foco); if (foco) ocultarBarras(); }
 
     private void cargarDatos() {
-        try { String[] nombres = getAssets().list(DIR); if (nombres != null) { pictos.addAll(Arrays.asList(nombres)); Collections.sort(pictos, String.CASE_INSENSITIVE_ORDER); } } catch (IOException ignored) { }
-        for (String archivo : pictos) {
-            if (!esCaptura(archivo)) catalogoBuscable.add(archivo);
-            nombresCache.put(archivo, calcularNombre(archivo));
-        }
-        Collections.sort(catalogoBuscable, String.CASE_INSENSITIVE_ORDER);
         int cacheBytes = (int) (Runtime.getRuntime().maxMemory() / 8);
         cacheMiniaturas = new LruCache<String, Bitmap>(cacheBytes) {
             @Override protected int sizeOf(String clave, Bitmap valor) { return valor.getByteCount(); }
         };
-        precargarMiniaturas();
+        cargarCatalogoPictos();
         List<PhraseRecord> cargadas = PhraseStore.cargar(this);
         List<PhraseRecord> validas = validarFrases(cargadas);
         frasesDescartadasAlCargar = cargadas.size() - validas.size();
         frases.addAll(validas);
         if (frasesDescartadasAlCargar > 0) PhraseStore.guardar(this, frases);
         restaurarSeleccionPdf();
+    }
+
+    /** Assets de base + carpeta local, con sufijo (n) si el nombre ya existe. */
+    private void cargarCatalogoPictos() {
+        pictos.clear();
+        catalogoBuscable.clear();
+        nombresCache.clear();
+        pictosLocales.clear();
+        if (cacheMiniaturas != null) cacheMiniaturas.evictAll();
+
+        List<String> deAssets = new ArrayList<>();
+        try {
+            String[] nombres = getAssets().list(DIR);
+            if (nombres != null) deAssets.addAll(Arrays.asList(nombres));
+        } catch (IOException ignored) { }
+
+        pictosLocales.putAll(PictosLocales.unificarConAssets(deAssets, PictosLocales.listar(this)));
+        pictos.addAll(deAssets);
+        pictos.addAll(pictosLocales.keySet());
+        Collections.sort(pictos, String.CASE_INSENSITIVE_ORDER);
+        for (String archivo : pictos) {
+            if (!esCaptura(archivo)) catalogoBuscable.add(archivo);
+            nombresCache.put(archivo, calcularNombre(archivo));
+        }
+        Collections.sort(catalogoBuscable, String.CASE_INSENSITIVE_ORDER);
+        precargarMiniaturas();
     }
 
     /** Recupera las frases marcadas para PDF emparejando por contenido. */
@@ -194,11 +298,19 @@ public class MainActivity extends Activity {
         tabPalabras = tab("Palabras", v -> { if (!escuchandoVoz) mostrarPalabras(); });
         tabFrases = tab("Frases", v -> { if (!escuchandoVoz) mostrarFrases(); });
         tabJuego = tab("Juego", v -> { if (!escuchandoVoz) mostrarJuego(); });
-        tabs.addView(tabPalabras, peso(1,-2,dp(4))); tabs.addView(tabFrases, peso(1,-2,dp(4)));
-        tabs.addView(tabJuego, peso(1,-2,dp(4)));
-        salir = new ImageButton(this); salir.setImageResource(android.R.drawable.ic_menu_close_clear_cancel); salir.setContentDescription("Salir de la aplicación"); salir.setBackgroundColor(Color.TRANSPARENT); salir.setVisibility(View.GONE); salir.setOnClickListener(v -> finishAffinity()); tabs.addView(salir, fijo(dp(52),dp(52),0)); contenido.addView(tabs);
+        tabs.addView(tabPalabras, peso(1,-2,dp(2))); tabs.addView(tabFrases, peso(1,-2,dp(2)));
+        tabs.addView(tabJuego, peso(1,-2,dp(2)));
+        tabEditar = tabIcono(android.R.drawable.ic_menu_edit, "Editar", null);
+        configurarPulsacionLargaEditar();
+        salir = tabIcono(android.R.drawable.ic_menu_close_clear_cancel, "Salir de la aplicación", v -> finishAffinity());
+        tabs.addView(tabEditar, fijo(dp(48), dp(48), 0));
+        tabs.addView(salir, fijo(dp(48), dp(48), 0));
+        contenido.addView(tabs);
         scrollLista = new ScrollView(this); lista = new LinearLayout(this); lista.setOrientation(LinearLayout.VERTICAL); lista.setPadding(dp(10),dp(4),dp(10),dp(4)); scrollLista.addView(lista); contenido.addView(scrollLista, expandirEnVertical());
         juegoPanel = new LinearLayout(this); juegoPanel.setOrientation(LinearLayout.VERTICAL); juegoPanel.setVisibility(View.GONE);
+        tecladoJuegoContenedor = new LinearLayout(this);
+        tecladoJuegoContenedor.setOrientation(LinearLayout.VERTICAL);
+        juegoPanel.addView(tecladoJuegoContenedor, new LinearLayout.LayoutParams(-1, -2));
         ScrollView scrollMosaico = new ScrollView(this);
         scrollMosaico.setVerticalScrollBarEnabled(true);
         scrollMosaico.setFillViewport(true);
@@ -215,6 +327,13 @@ public class MainActivity extends Activity {
         LinearLayout.LayoutParams controlesParams = new LinearLayout.LayoutParams(-1, -2);
         controlesParams.topMargin = dp(6);
         int tamBoton = dp(40);
+        botonDisyuncionJuego = tecla("Disyunción", TECLA_NORMAL, v -> ejecutarDisyuncionJuego());
+        botonDisyuncionJuego.setTextSize(TypedValue.COMPLEX_UNIT_SP, 11);
+        botonDisyuncionJuego.setContentDescription("Elegir entre los dos pictogramas");
+        botonDisyuncionJuego.setVisibility(View.GONE);
+        LinearLayout.LayoutParams disParams = new LinearLayout.LayoutParams(dp(92), tamBoton);
+        disParams.rightMargin = dp(4);
+        controlesJuego.addView(botonDisyuncionJuego, disParams);
         botonEnviarJuego = tecla("", TECLA_NORMAL, v -> enviarJuego());
         botonEnviarJuego.setText(etiquetaPlay());
         botonEnviarJuego.setContentDescription("Reproducir frase");
@@ -233,14 +352,41 @@ public class MainActivity extends Activity {
         });
         juegoPanel.addView(tabEleccionJuego, new LinearLayout.LayoutParams(-1, -2));
         juegoPanel.addOnLayoutChangeListener((v, l, t, r, b, ol, ot, or, ob) -> {
-            if (solapaActual == SOLAPA_JUEGO && r - l != or - ol && !pictosUsadosEnFrases().isEmpty()) {
-                aplicarMosaicoJuego(pictosUsadosEnFrases());
+            if (solapaActual == SOLAPA_JUEGO && r - l != or - ol) {
+                List<String> visibles = pictosVisiblesJuego();
+                if (!visibles.isEmpty()) aplicarMosaicoJuego(visibles);
             }
         });
         contenido.addView(juegoPanel, expandirEnVertical());
+        panelEdicion = crearPanelEdicion();
+        panelEdicion.setVisibility(View.GONE);
+        raiz.addView(panelEdicion, new FrameLayout.LayoutParams(-1, -1));
+        panelAudioPictos = crearPanelAudioPictos();
+        panelAudioPictos.setVisibility(View.GONE);
+        raiz.addView(panelAudioPictos, new FrameLayout.LayoutParams(-1, -1));
         setContentView(raiz);
     }
-    private Button tab(String texto, View.OnClickListener accion) { Button b = new Button(this); b.setText(texto.toUpperCase(Locale.ROOT)); b.setTextSize(18); b.setTextColor(0xff263238); b.setAllCaps(false); b.setGravity(Gravity.CENTER); b.setOnClickListener(accion); return b; }
+    private Button tab(String texto, View.OnClickListener accion) {
+        Button b = new Button(this);
+        b.setText(texto.toUpperCase(Locale.ROOT));
+        b.setTextSize(13);
+        b.setTextColor(0xff263238);
+        b.setAllCaps(false);
+        b.setGravity(Gravity.CENTER);
+        b.setPadding(dp(2), dp(6), dp(2), dp(6));
+        b.setOnClickListener(accion);
+        return b;
+    }
+
+    private ImageButton tabIcono(int icono, String descripcion, View.OnClickListener accion) {
+        ImageButton b = new ImageButton(this);
+        b.setImageResource(icono);
+        b.setContentDescription(descripcion);
+        b.setScaleType(ImageView.ScaleType.CENTER_INSIDE);
+        b.setPadding(dp(8), dp(8), dp(8), dp(8));
+        if (accion != null) b.setOnClickListener(accion);
+        return b;
+    }
 
     private void mostrarPalabras() {
         solapaActual = SOLAPA_PALABRAS; actualizarTabs();
@@ -677,15 +823,17 @@ public class MainActivity extends Activity {
             tabPalabras.setEnabled(false);
             tabFrases.setEnabled(false);
             tabJuego.setEnabled(false);
+            tabEditar.setEnabled(false);
             tabPalabras.setAlpha(0.35f);
             tabFrases.setAlpha(0.35f);
             tabJuego.setAlpha(0.35f);
+            tabEditar.setAlpha(0.35f);
             salir.setEnabled(false);
-            if (salir.getVisibility() == View.VISIBLE) salir.setAlpha(0.35f);
+            salir.setAlpha(0.35f);
         } else {
             actualizarTabs();
             salir.setEnabled(true);
-            if (salir.getVisibility() == View.VISIBLE) salir.setAlpha(1f);
+            salir.setAlpha(1f);
         }
         if (scrollLista != null) scrollLista.setEnabled(!bloqueado);
         if (solapaActual != SOLAPA_PALABRAS || lista == null) return;
@@ -773,7 +921,7 @@ public class MainActivity extends Activity {
                 borrador.add(PhraseRecord.Item.automatico(palabra));
                 continue;
             }
-            borrador.add(new PhraseRecord.Item(coincidencia.archivo, coincidencia.negado));
+            borrador.add(new PhraseRecord.Item(varianteMasUsada(coincidencia.archivo), coincidencia.negado));
         }
         filtroTeclado = "";
         mostrarPalabras();
@@ -888,32 +1036,1397 @@ public class MainActivity extends Activity {
         while (seleccionJuego.size() > MAX_PICTOS_JUEGO) seleccionJuego.remove(seleccionJuego.size() - 1);
         construirVistaJuego();
     }
+
     private void actualizarTabs() {
         boolean enPalabras = solapaActual == SOLAPA_PALABRAS;
         boolean enFrases = solapaActual == SOLAPA_FRASES;
         boolean enJuego = solapaActual == SOLAPA_JUEGO;
         tabPalabras.setEnabled(!enPalabras); tabFrases.setEnabled(!enFrases); tabJuego.setEnabled(!enJuego);
         tabPalabras.setAlpha(enPalabras ? 1 : .72f); tabFrases.setAlpha(enFrases ? 1 : .72f); tabJuego.setAlpha(enJuego ? 1 : .72f);
-        tabPalabras.setBackground(fondoSolapa(enPalabras)); tabFrases.setBackground(fondoSolapa(enFrases)); tabJuego.setBackground(fondoSolapa(enJuego));
-        salir.setVisibility(enPalabras ? View.GONE : View.VISIBLE);
+        tabPalabras.setBackground(fondoSolapa(enPalabras)); tabFrases.setBackground(fondoSolapa(enFrases));
+        tabJuego.setBackground(fondoSolapa(enJuego));
+        tabEditar.setEnabled(true);
+        tabEditar.setAlpha(.72f);
+        tabEditar.setBackground(fondoSolapa(false));
+        salir.setVisibility(View.VISIBLE);
+        salir.setBackground(fondoSolapa(false));
+        salir.setAlpha(1f);
+    }
+
+    private void configurarPulsacionLargaEditar() {
+        tabEditar.setOnTouchListener((v, event) -> {
+            if (escuchandoVoz || modoEdicion) return true;
+            switch (event.getActionMasked()) {
+                case MotionEvent.ACTION_DOWN:
+                    handlerEscucha.postDelayed(entrarModoEdicionRunnable, MS_MODO_EDICION);
+                    return true;
+                case MotionEvent.ACTION_UP:
+                case MotionEvent.ACTION_CANCEL:
+                    handlerEscucha.removeCallbacks(entrarModoEdicionRunnable);
+                    return true;
+                default:
+                    return true;
+            }
+        });
+    }
+
+    private LinearLayout crearPanelEdicion() {
+        LinearLayout panel = new LinearLayout(this);
+        panel.setOrientation(LinearLayout.VERTICAL);
+        panel.setBackgroundColor(0xfff7f8fa);
+        panel.setPadding(dp(10), dp(10), dp(10), dp(10));
+
+        LinearLayout cabecera = new LinearLayout(this);
+        cabecera.setOrientation(LinearLayout.HORIZONTAL);
+        cabecera.setGravity(Gravity.CENTER_VERTICAL);
+
+        Button guardar = new Button(this);
+        guardar.setText("Guardar y Salir");
+        guardar.setTextSize(16);
+        guardar.setAllCaps(false);
+        guardar.setTextColor(0xff263238);
+        guardar.setBackground(fondoSolapa(true));
+        guardar.setOnClickListener(v -> guardarYSalirEdicion());
+        cabecera.addView(guardar, new LinearLayout.LayoutParams(0, dp(52), 1));
+
+        ImageButton exportarPictos = new ImageButton(this);
+        exportarPictos.setImageResource(android.R.drawable.ic_menu_save);
+        exportarPictos.setContentDescription("Exportar pictos propios a carpeta pública");
+        exportarPictos.setScaleType(ImageView.ScaleType.CENTER_INSIDE);
+        exportarPictos.setBackground(fondoSolapa(false));
+        exportarPictos.setPadding(dp(8), dp(8), dp(8), dp(8));
+        exportarPictos.setOnClickListener(v -> pedirExportarPictos());
+        LinearLayout.LayoutParams exportPictosParams = fijo(dp(52), dp(52), 0);
+        exportPictosParams.leftMargin = dp(6);
+        cabecera.addView(exportarPictos, exportPictosParams);
+
+        botonAccesoAudio = new Button(this);
+        botonAccesoAudio.setText("!");
+        botonAccesoAudio.setTextSize(TypedValue.COMPLEX_UNIT_SP, 20);
+        botonAccesoAudio.setTypeface(Typeface.DEFAULT_BOLD);
+        botonAccesoAudio.setAllCaps(false);
+        botonAccesoAudio.setTextColor(0xff718596);
+        botonAccesoAudio.setContentDescription("Audios de pictogramas");
+        botonAccesoAudio.setBackground(fondoSolapa(false));
+        botonAccesoAudio.setOnClickListener(null);
+        configurarPulsacionLargaAudio();
+        LinearLayout.LayoutParams accesoParams = fijo(dp(44), dp(52), 0);
+        accesoParams.leftMargin = dp(6);
+        cabecera.addView(botonAccesoAudio, accesoParams);
+        panel.addView(cabecera, new LinearLayout.LayoutParams(-1, -2));
+
+        filaControlesEdicion = new LinearLayout(this);
+        filaControlesEdicion.setOrientation(LinearLayout.HORIZONTAL);
+        filaControlesEdicion.setGravity(Gravity.CENTER);
+        LinearLayout.LayoutParams filaParams = new LinearLayout.LayoutParams(-1, -2);
+        filaParams.topMargin = dp(8);
+        filaControlesEdicion.setLayoutParams(filaParams);
+
+        botonCamaraEdicion = new ImageButton(this);
+        botonCamaraEdicion.setImageResource(android.R.drawable.ic_menu_camera);
+        botonCamaraEdicion.setContentDescription("Tomar o buscar foto");
+        botonCamaraEdicion.setScaleType(ImageView.ScaleType.CENTER_INSIDE);
+        botonCamaraEdicion.setBackground(fondoTecla(TECLA_NORMAL));
+        botonCamaraEdicion.setOnClickListener(v -> elegirOrigenFoto());
+        filaControlesEdicion.addView(botonCamaraEdicion, fijo(dp(80), dp(80), dp(8)));
+
+        imagenPendienteEdicion = new ImageView(this);
+        imagenPendienteEdicion.setScaleType(ImageView.ScaleType.CENTER_INSIDE);
+        imagenPendienteEdicion.setAdjustViewBounds(true);
+        imagenPendienteEdicion.setBackground(bordePicto());
+        imagenPendienteEdicion.setPadding(dp(3), dp(3), dp(3), dp(3));
+        imagenPendienteEdicion.setVisibility(View.GONE);
+        filaControlesEdicion.addView(imagenPendienteEdicion, fijo(dp(80), dp(80), dp(8)));
+
+        botonMicroEdicionCaja = new LinearLayout(this);
+        botonMicroEdicionCaja.setOrientation(LinearLayout.HORIZONTAL);
+        botonMicroEdicionCaja.setGravity(Gravity.CENTER);
+        botonMicroEdicionCaja.setBackground(fondoTecla(TECLA_NORMAL));
+        botonMicroEdicionCaja.setPadding(dp(6), 0, dp(8), 0);
+        botonMicroEdicionCaja.setOnClickListener(v -> pedirEscuchaNombre());
+
+        botonMicroEdicion = new ImageButton(this);
+        botonMicroEdicion.setBackgroundColor(Color.TRANSPARENT);
+        botonMicroEdicion.setScaleType(ImageView.ScaleType.FIT_CENTER);
+        botonMicroEdicion.setPadding(dp(4), dp(6), dp(4), dp(6));
+        botonMicroEdicion.setClickable(false);
+        botonMicroEdicion.setFocusable(false);
+        botonMicroEdicionCaja.addView(botonMicroEdicion, fijo(dp(32), dp(80), 0));
+
+        textoCountdownNombre = new TextView(this);
+        textoCountdownNombre.setTextSize(TypedValue.COMPLEX_UNIT_SP, 18);
+        textoCountdownNombre.setTypeface(Typeface.DEFAULT_BOLD);
+        textoCountdownNombre.setTextColor(0xff263238);
+        textoCountdownNombre.setGravity(Gravity.CENTER);
+        textoCountdownNombre.setMinWidth(dp(28));
+        textoCountdownNombre.setVisibility(View.GONE);
+        botonMicroEdicionCaja.addView(textoCountdownNombre, new LinearLayout.LayoutParams(-2, -1));
+        filaControlesEdicion.addView(botonMicroEdicionCaja, fijo(dp(108), dp(80), dp(8)));
+        panel.addView(filaControlesEdicion);
+        habilitarMicroEdicion(false);
+        actualizarIconoMicroEdicion(false);
+
+        cajaPendienteEdicion = new LinearLayout(this);
+        cajaPendienteEdicion.setOrientation(LinearLayout.VERTICAL);
+        cajaPendienteEdicion.setPadding(dp(8), dp(8), dp(8), dp(8));
+        cajaPendienteEdicion.setBackground(fondoPanel());
+        cajaPendienteEdicion.setVisibility(View.GONE);
+        LinearLayout.LayoutParams pendParams = new LinearLayout.LayoutParams(-1, -2);
+        pendParams.topMargin = dp(8);
+        cajaPendienteEdicion.setLayoutParams(pendParams);
+
+        imagenPreviewEdicion = new ImageView(this);
+        imagenPreviewEdicion.setScaleType(ImageView.ScaleType.CENTER_INSIDE);
+        imagenPreviewEdicion.setAdjustViewBounds(true);
+        imagenPreviewEdicion.setBackground(bordePicto());
+        imagenPreviewEdicion.setPadding(dp(4), dp(4), dp(4), dp(4));
+        cajaPendienteEdicion.addView(imagenPreviewEdicion, new LinearLayout.LayoutParams(-1, dp(180)));
+
+        cajaAccionesFotoEdicion = new LinearLayout(this);
+        cajaAccionesFotoEdicion.setOrientation(LinearLayout.HORIZONTAL);
+        cajaAccionesFotoEdicion.setGravity(Gravity.CENTER);
+        Button recortar = tecla("Recortar", TECLA_NORMAL, v -> pedirRecorteFoto());
+        Button aceptar = tecla("Aceptar foto", TECLA_NORMAL, v -> aceptarFotoPendiente());
+        Button cancelar = tecla("Cancelar", TECLA_NORMAL, v -> cancelarProcesoFoto());
+        cajaAccionesFotoEdicion.addView(recortar, peso(1, dp(40), dp(3)));
+        cajaAccionesFotoEdicion.addView(aceptar, peso(1, dp(40), dp(3)));
+        cajaAccionesFotoEdicion.addView(cancelar, peso(1, dp(40), dp(3)));
+        cajaPendienteEdicion.addView(cajaAccionesFotoEdicion);
+
+        nombrePendienteEdicion = new EditText(this);
+        nombrePendienteEdicion.setHint("Nombre del pictograma");
+        nombrePendienteEdicion.setSingleLine(true);
+        nombrePendienteEdicion.setImeOptions(EditorInfo.IME_ACTION_DONE);
+        nombrePendienteEdicion.setTextSize(18);
+        nombrePendienteEdicion.setVisibility(View.GONE);
+        LinearLayout.LayoutParams nomParams = new LinearLayout.LayoutParams(-1, -2);
+        nomParams.topMargin = dp(8);
+        cajaPendienteEdicion.addView(nombrePendienteEdicion, nomParams);
+
+        botonOkPendienteEdicion = tecla("OK", TECLA_NORMAL, v -> confirmarPictoPendiente());
+        botonOkPendienteEdicion.setVisibility(View.GONE);
+        LinearLayout.LayoutParams okParams = new LinearLayout.LayoutParams(-1, dp(44));
+        okParams.topMargin = dp(8);
+        cajaPendienteEdicion.addView(botonOkPendienteEdicion, okParams);
+        panel.addView(cajaPendienteEdicion);
+
+        cajaRecorteEdicion = new LinearLayout(this);
+        cajaRecorteEdicion.setOrientation(LinearLayout.VERTICAL);
+        cajaRecorteEdicion.setVisibility(View.GONE);
+        LinearLayout.LayoutParams recParams = new LinearLayout.LayoutParams(-1, 0, 1);
+        recParams.topMargin = dp(8);
+        cajaRecorteEdicion.setLayoutParams(recParams);
+        vistaRecorteEdicion = new RecorteFotoVista(this);
+        cajaRecorteEdicion.addView(vistaRecorteEdicion, new LinearLayout.LayoutParams(-1, 0, 1));
+        LinearLayout accionesRecorte = new LinearLayout(this);
+        accionesRecorte.setOrientation(LinearLayout.HORIZONTAL);
+        accionesRecorte.setGravity(Gravity.CENTER);
+        Button listoRecorte = tecla("Listo", TECLA_NORMAL, v -> aplicarRecorteInterno());
+        Button cancelarRecorte = tecla("Cancelar", TECLA_NORMAL, v -> cancelarRecorteInterno());
+        accionesRecorte.addView(listoRecorte, peso(1, dp(40), dp(4)));
+        accionesRecorte.addView(cancelarRecorte, peso(1, dp(40), dp(4)));
+        LinearLayout.LayoutParams accRec = new LinearLayout.LayoutParams(-1, -2);
+        accRec.topMargin = dp(6);
+        cajaRecorteEdicion.addView(accionesRecorte, accRec);
+        panel.addView(cajaRecorteEdicion);
+
+        scrollEdicion = new ScrollView(this);
+        listaPictosEdicion = new LinearLayout(this);
+        listaPictosEdicion.setOrientation(LinearLayout.VERTICAL);
+        scrollEdicion.addView(listaPictosEdicion);
+        LinearLayout.LayoutParams scrollParams = new LinearLayout.LayoutParams(-1, 0, 1);
+        scrollParams.topMargin = dp(10);
+        panel.addView(scrollEdicion, scrollParams);
+        return panel;
+    }
+
+    private void entrarModoEdicion() {
+        if (escuchandoVoz || modoEdicion) return;
+        modoEdicion = true;
+        tabEditar.performHapticFeedback(HapticFeedbackConstants.LONG_PRESS);
+        PictosLocales.carpeta(this);
+        AudiosPictos.carpeta(this);
+        ocultarTeclado();
+        cancelarPendienteEdicion();
+        mostrarListadoEdicion(true);
+        mostrarControlesEdicion(true);
+        habilitarMicroEdicion(false);
+        refrescarListaEdicion();
+        contenido.setVisibility(View.GONE);
+        if (panelAudioPictos != null) panelAudioPictos.setVisibility(View.GONE);
+        modoAudioPictos = false;
+        panelEdicion.setVisibility(View.VISIBLE);
+    }
+
+    private void guardarYSalirEdicion() {
+        if (!modoEdicion) return;
+        if (modoAudioPictos) salirGestionAudio(false);
+        detenerEscuchaNombre();
+        cancelarPendienteEdicion();
+        ocultarTeclado();
+        cargarCatalogoPictos();
+        List<PhraseRecord> validas = validarFrases(new ArrayList<>(frases));
+        if (validas.size() != frases.size()) {
+            frases.clear();
+            frases.addAll(validas);
+            PhraseStore.guardar(this, frases);
+            limpiarSeleccionInvalida();
+            persistirSeleccionPdf();
+        }
+        modoEdicion = false;
+        panelEdicion.setVisibility(View.GONE);
+        if (panelAudioPictos != null) panelAudioPictos.setVisibility(View.GONE);
+        contenido.setVisibility(View.VISIBLE);
+        if (solapaActual == SOLAPA_FRASES) mostrarFrases();
+        else if (solapaActual == SOLAPA_JUEGO) mostrarJuego();
+        else mostrarPalabras();
+    }
+
+    private void configurarPulsacionLargaAudio() {
+        if (botonAccesoAudio == null) return;
+        botonAccesoAudio.setOnTouchListener((v, event) -> {
+            if (!modoEdicion || modoAudioPictos || escuchandoNombre) return true;
+            switch (event.getActionMasked()) {
+                case MotionEvent.ACTION_DOWN:
+                    handlerEscucha.postDelayed(entrarGestionAudioRunnable, MS_ACCESO_AUDIO);
+                    return true;
+                case MotionEvent.ACTION_UP:
+                case MotionEvent.ACTION_CANCEL:
+                    handlerEscucha.removeCallbacks(entrarGestionAudioRunnable);
+                    return true;
+                default:
+                    return true;
+            }
+        });
+    }
+
+    private LinearLayout crearPanelAudioPictos() {
+        LinearLayout panel = new LinearLayout(this);
+        panel.setOrientation(LinearLayout.VERTICAL);
+        panel.setBackgroundColor(0xfff7f8fa);
+        panel.setPadding(dp(10), dp(10), dp(10), dp(10));
+
+        LinearLayout cabecera = new LinearLayout(this);
+        cabecera.setOrientation(LinearLayout.HORIZONTAL);
+        cabecera.setGravity(Gravity.CENTER_VERTICAL);
+
+        Button volver = new Button(this);
+        volver.setText("Volver");
+        volver.setTextSize(16);
+        volver.setAllCaps(false);
+        volver.setTextColor(0xff263238);
+        volver.setBackground(fondoSolapa(true));
+        volver.setOnClickListener(v -> salirGestionAudio(true));
+        cabecera.addView(volver, new LinearLayout.LayoutParams(0, dp(48), 1));
+
+        TextView titulo = new TextView(this);
+        titulo.setText("Audios");
+        titulo.setTextSize(TypedValue.COMPLEX_UNIT_SP, 18);
+        titulo.setTypeface(Typeface.DEFAULT_BOLD);
+        titulo.setTextColor(0xff263238);
+        titulo.setGravity(Gravity.CENTER);
+        titulo.setPadding(dp(8), 0, dp(8), 0);
+        cabecera.addView(titulo, new LinearLayout.LayoutParams(0, -2, 1));
+
+        ImageButton exportar = new ImageButton(this);
+        exportar.setImageResource(android.R.drawable.ic_menu_save);
+        exportar.setContentDescription("Exportar audios a carpeta pública");
+        exportar.setScaleType(ImageView.ScaleType.CENTER_INSIDE);
+        exportar.setBackground(fondoSolapa(false));
+        exportar.setPadding(dp(8), dp(8), dp(8), dp(8));
+        exportar.setOnClickListener(v -> pedirExportarAudios());
+        LinearLayout.LayoutParams exportParams = fijo(dp(48), dp(48), 0);
+        exportParams.leftMargin = dp(4);
+        cabecera.addView(exportar, exportParams);
+        panel.addView(cabecera, new LinearLayout.LayoutParams(-1, -2));
+
+        LinearLayout filtros = new LinearLayout(this);
+        filtros.setOrientation(LinearLayout.HORIZONTAL);
+        filtros.setGravity(Gravity.CENTER);
+        LinearLayout.LayoutParams filtrosParams = new LinearLayout.LayoutParams(-1, -2);
+        filtrosParams.topMargin = dp(8);
+        filtrosParams.bottomMargin = dp(4);
+        filtros.setLayoutParams(filtrosParams);
+
+        Button fTodos = botonFiltroAudio("Todos", FILTRO_AUDIO_TODOS);
+        Button fCon = botonFiltroAudio("Con audio", FILTRO_AUDIO_CON);
+        Button fSin = botonFiltroAudio("Sin audio", FILTRO_AUDIO_SIN);
+        filtros.addView(fTodos, peso(1, dp(40), dp(3)));
+        filtros.addView(fCon, peso(1, dp(40), dp(3)));
+        filtros.addView(fSin, peso(1, dp(40), dp(3)));
+        panel.addView(filtros);
+        panel.setTag(filtros);
+
+        ScrollView scroll = new ScrollView(this);
+        listaAudioPictos = new LinearLayout(this);
+        listaAudioPictos.setOrientation(LinearLayout.VERTICAL);
+        scroll.addView(listaAudioPictos);
+        LinearLayout.LayoutParams scrollParams = new LinearLayout.LayoutParams(-1, 0, 1);
+        scrollParams.topMargin = dp(6);
+        panel.addView(scroll, scrollParams);
+        return panel;
+    }
+
+    private Button botonFiltroAudio(String texto, int filtro) {
+        Button boton = new Button(this);
+        boton.setText(texto);
+        boton.setTextSize(TypedValue.COMPLEX_UNIT_SP, 13);
+        boton.setAllCaps(false);
+        boton.setTextColor(0xff263238);
+        boton.setBackground(fondoTecla(TECLA_NORMAL));
+        boton.setTag("filtro_audio_" + filtro);
+        boton.setOnClickListener(v -> aplicarFiltroAudio(filtro));
+        return boton;
+    }
+
+    private void entrarGestionAudio() {
+        if (!modoEdicion || modoAudioPictos) return;
+        detenerEscuchaNombre();
+        cancelarPendienteEdicion();
+        ocultarTeclado();
+        modoAudioPictos = true;
+        if (botonAccesoAudio != null) {
+            botonAccesoAudio.performHapticFeedback(HapticFeedbackConstants.LONG_PRESS);
+        }
+        AudiosPictos.carpeta(this);
+        filtroAudioPictos = FILTRO_AUDIO_TODOS;
+        panelEdicion.setVisibility(View.GONE);
+        panelAudioPictos.setVisibility(View.VISIBLE);
+        actualizarBotonesFiltroAudio();
+        refrescarListaAudioPictos();
+    }
+
+    private void salirGestionAudio(boolean volverAEdicion) {
+        detenerGrabacionAudio(false);
+        detenerReproduccionAudioPicto();
+        if (dialogoGrabacion != null) {
+            dialogoGrabacion.dismiss();
+            dialogoGrabacion = null;
+        }
+        modoAudioPictos = false;
+        if (panelAudioPictos != null) panelAudioPictos.setVisibility(View.GONE);
+        if (volverAEdicion && modoEdicion) {
+            mostrarListadoEdicion(true);
+            mostrarControlesEdicion(true);
+            refrescarListaEdicion();
+            panelEdicion.setVisibility(View.VISIBLE);
+        }
+    }
+
+    private void aplicarFiltroAudio(int filtro) {
+        if (filtroAudioPictos == filtro) return;
+        filtroAudioPictos = filtro;
+        actualizarBotonesFiltroAudio();
+        refrescarListaAudioPictos();
+    }
+
+    private void actualizarBotonesFiltroAudio() {
+        if (panelAudioPictos == null) return;
+        Object tag = panelAudioPictos.getTag();
+        if (!(tag instanceof ViewGroup)) return;
+        ViewGroup filtros = (ViewGroup) tag;
+        for (int i = 0; i < filtros.getChildCount(); i++) {
+            View hijo = filtros.getChildAt(i);
+            if (!(hijo instanceof Button)) continue;
+            Object t = hijo.getTag();
+            boolean activo = ("filtro_audio_" + filtroAudioPictos).equals(t);
+            ((Button) hijo).setBackground(fondoTecla(activo ? TECLA_PULSADA : TECLA_NORMAL));
+            ((Button) hijo).setTextColor(activo ? Color.WHITE : 0xff263238);
+        }
+    }
+
+    private void refrescarListaAudioPictos() {
+        if (listaAudioPictos == null) return;
+        listaAudioPictos.removeAllViews();
+        List<String> visibles = pictosFiltradosAudio();
+        if (visibles.isEmpty()) {
+            TextView vacio = new TextView(this);
+            vacio.setText(filtroAudioPictos == FILTRO_AUDIO_CON
+                    ? "Ningún pictograma tiene audio todavía."
+                    : filtroAudioPictos == FILTRO_AUDIO_SIN
+                    ? "Todos los pictogramas ya tienen audio."
+                    : "No hay pictogramas.");
+            vacio.setTextSize(16);
+            vacio.setGravity(Gravity.CENTER);
+            vacio.setPadding(0, dp(24), 0, dp(8));
+            listaAudioPictos.addView(vacio);
+            return;
+        }
+        int indice = 0;
+        for (String archivo : visibles) {
+            listaAudioPictos.addView(tarjetaAudioPicto(archivo, indice++));
+        }
+    }
+
+    private List<String> pictosFiltradosAudio() {
+        List<String> r = new ArrayList<>();
+        for (String archivo : pictos) {
+            if (!AudiosPictos.esImagenCatalogo(archivo)) continue;
+            boolean tiene = AudiosPictos.existe(this, archivo);
+            if (filtroAudioPictos == FILTRO_AUDIO_CON && !tiene) continue;
+            if (filtroAudioPictos == FILTRO_AUDIO_SIN && tiene) continue;
+            r.add(archivo);
+        }
+        Collections.sort(r, String.CASE_INSENSITIVE_ORDER);
+        return r;
+    }
+
+    private View tarjetaAudioPicto(String archivo, int indice) {
+        LinearLayout fila = nuevaFila();
+        fila.setBackground(fondoPalabra(indice, false));
+        fila.setGravity(Gravity.CENTER_VERTICAL);
+
+        ImageView imagen = new ImageView(this);
+        imagen.setScaleType(ImageView.ScaleType.CENTER_INSIDE);
+        imagen.setAdjustViewBounds(true);
+        imagen.setBackground(bordePicto());
+        imagen.setPadding(dp(3), dp(3), dp(3), dp(3));
+        Bitmap mini = decodificarPicto(archivo, TAM_MINIATURA_LISTA);
+        if (mini != null) imagen.setImageBitmap(mini);
+        fila.addView(imagen, fijo(dp(64), dp(64), dp(4)));
+
+        LinearLayout textos = new LinearLayout(this);
+        textos.setOrientation(LinearLayout.VERTICAL);
+        textos.setGravity(Gravity.CENTER_VERTICAL);
+        TextView nombreArchivo = new TextView(this);
+        nombreArchivo.setText(AudiosPictos.baseDePicto(archivo));
+        nombreArchivo.setTextSize(TypedValue.COMPLEX_UNIT_SP, 16);
+        nombreArchivo.setTypeface(Typeface.DEFAULT_BOLD);
+        nombreArchivo.setTextColor(0xff263238);
+        nombreArchivo.setMaxLines(2);
+        textos.addView(nombreArchivo, new LinearLayout.LayoutParams(-1, -2));
+
+        boolean tieneAudio = AudiosPictos.existe(this, archivo);
+        TextView estado = new TextView(this);
+        estado.setText(tieneAudio ? "Con audio" : "Sin audio");
+        estado.setTextSize(TypedValue.COMPLEX_UNIT_SP, 12);
+        estado.setTextColor(tieneAudio ? 0xff2E7D32 : 0xff90A4AE);
+        textos.addView(estado, new LinearLayout.LayoutParams(-1, -2));
+
+        LinearLayout.LayoutParams textoParams = new LinearLayout.LayoutParams(0, -2, 1);
+        textoParams.leftMargin = dp(4);
+        textoParams.rightMargin = dp(4);
+        fila.addView(textos, textoParams);
+
+        ImageButton play = new ImageButton(this);
+        Drawable iconoPlay = getResources().getDrawable(android.R.drawable.ic_media_play, getTheme()).mutate();
+        iconoPlay.setTint(tieneAudio ? 0xff263238 : 0xffB0BEC5);
+        play.setImageDrawable(iconoPlay);
+        play.setContentDescription("Reproducir audio");
+        play.setBackground(fondoTecla(TECLA_NORMAL));
+        play.setScaleType(ImageView.ScaleType.CENTER_INSIDE);
+        play.setEnabled(tieneAudio);
+        play.setAlpha(tieneAudio ? 1f : 0.45f);
+        play.setOnClickListener(v -> reproducirAudioPicto(archivo));
+        fila.addView(play, fijo(dp(48), dp(48), dp(2)));
+
+        ImageButton micro = new ImageButton(this);
+        Drawable iconoMicro = getResources().getDrawable(android.R.drawable.ic_btn_speak_now, getTheme()).mutate();
+        iconoMicro.setTint(0xff263238);
+        micro.setImageDrawable(iconoMicro);
+        micro.setContentDescription("Grabar audio");
+        micro.setBackground(fondoTecla(TECLA_NORMAL));
+        micro.setScaleType(ImageView.ScaleType.CENTER_INSIDE);
+        micro.setOnClickListener(v -> pedirGrabacionAudio(archivo));
+        fila.addView(micro, fijo(dp(48), dp(48), dp(2)));
+
+        return fila;
+    }
+
+    private void reproducirAudioPicto(String archivoPicto) {
+        File audio = AudiosPictos.archivoPara(this, archivoPicto);
+        if (!audio.isFile()) {
+            Toast.makeText(this, "Todavía no hay audio para este pictograma.", Toast.LENGTH_SHORT).show();
+            return;
+        }
+        detenerReproduccionAudioPicto();
+        try {
+            MediaPlayer player = new MediaPlayer();
+            player.setDataSource(audio.getAbsolutePath());
+            player.setOnCompletionListener(mp -> {
+                mp.release();
+                if (playerAudioPicto == mp) playerAudioPicto = null;
+            });
+            player.setOnErrorListener((mp, what, extra) -> {
+                mp.release();
+                if (playerAudioPicto == mp) playerAudioPicto = null;
+                Toast.makeText(this, "No se pudo reproducir el audio.", Toast.LENGTH_SHORT).show();
+                return true;
+            });
+            player.prepare();
+            player.start();
+            playerAudioPicto = player;
+        } catch (IOException | RuntimeException e) {
+            Toast.makeText(this, "No se pudo reproducir el audio.", Toast.LENGTH_SHORT).show();
+        }
+    }
+
+    private void detenerReproduccionAudioPicto() {
+        if (playerAudioPicto != null) {
+            try { playerAudioPicto.stop(); } catch (RuntimeException ignored) { }
+            try { playerAudioPicto.release(); } catch (RuntimeException ignored) { }
+            playerAudioPicto = null;
+        }
+    }
+
+    private void pedirGrabacionAudio(String archivoPicto) {
+        if (archivoPicto == null || archivoPicto.isEmpty()) return;
+        if (checkSelfPermission(android.Manifest.permission.RECORD_AUDIO) != PackageManager.PERMISSION_GRANTED) {
+            pictoPendienteGrabar = archivoPicto;
+            requestPermissions(new String[]{android.Manifest.permission.RECORD_AUDIO}, PERMISO_MICRO_AUDIO);
+            return;
+        }
+        iniciarGrabacionAudio(archivoPicto);
+    }
+
+    private void iniciarGrabacionAudio(String archivoPicto) {
+        detenerReproduccionAudioPicto();
+        detenerGrabacionAudio(false);
+        AudiosPictos.borrarTemp(this);
+        File temp = AudiosPictos.tempGrabacion(this);
+        try {
+            MediaRecorder recorder;
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+                recorder = new MediaRecorder(this);
+            } else {
+                recorder = new MediaRecorder();
+            }
+            recorder.setAudioSource(MediaRecorder.AudioSource.MIC);
+            recorder.setOutputFormat(MediaRecorder.OutputFormat.MPEG_4);
+            recorder.setAudioEncoder(MediaRecorder.AudioEncoder.AAC);
+            recorder.setAudioSamplingRate(44100);
+            recorder.setAudioEncodingBitRate(128000);
+            recorder.setOutputFile(temp.getAbsolutePath());
+            recorder.prepare();
+            recorder.start();
+            grabadorAudio = recorder;
+            pictoGrabando = archivoPicto;
+            mostrarDialogoGrabacion(archivoPicto);
+        } catch (IOException | RuntimeException e) {
+            liberarGrabadorAudio();
+            AudiosPictos.borrarTemp(this);
+            Toast.makeText(this, "No se pudo iniciar la grabación.", Toast.LENGTH_SHORT).show();
+        }
+    }
+
+    private void mostrarDialogoGrabacion(String archivoPicto) {
+        if (dialogoGrabacion != null) {
+            dialogoGrabacion.dismiss();
+            dialogoGrabacion = null;
+        }
+        segundosRestantesGrabacion = SEGUNDOS_MAX_GRABACION;
+        final TextView mensaje = new TextView(this);
+        mensaje.setText("Decí \"" + AudiosPictos.baseDePicto(archivoPicto) + "\"\n"
+                + "Quedan " + segundosRestantesGrabacion + " s");
+        mensaje.setTextSize(TypedValue.COMPLEX_UNIT_SP, 16);
+        mensaje.setPadding(dp(24), dp(16), dp(24), dp(8));
+        mensaje.setGravity(Gravity.CENTER);
+
+        dialogoGrabacion = new AlertDialog.Builder(this)
+                .setTitle("Grabando audio")
+                .setView(mensaje)
+                .setCancelable(false)
+                .setPositiveButton("Detener", (d, w) -> detenerGrabacionAudio(true))
+                .setNegativeButton("Cancelar", (d, w) -> detenerGrabacionAudio(false))
+                .create();
+        dialogoGrabacion.setOnDismissListener(d -> {
+            if (dialogoGrabacion == d) dialogoGrabacion = null;
+        });
+        dialogoGrabacion.show();
+
+        cancelarCountdownGrabacion();
+        countdownGrabacion = new Runnable() {
+            @Override public void run() {
+                if (grabadorAudio == null || pictoGrabando == null) return;
+                segundosRestantesGrabacion--;
+                if (segundosRestantesGrabacion <= 0) {
+                    detenerGrabacionAudio(true);
+                    return;
+                }
+                if (mensaje.getParent() != null) {
+                    mensaje.setText("Decí \"" + AudiosPictos.baseDePicto(archivoPicto) + "\"\n"
+                            + "Quedan " + segundosRestantesGrabacion + " s");
+                }
+                handlerEscucha.postDelayed(this, 1000);
+            }
+        };
+        handlerEscucha.postDelayed(countdownGrabacion, 1000);
+    }
+
+    private void cancelarCountdownGrabacion() {
+        if (countdownGrabacion != null) {
+            handlerEscucha.removeCallbacks(countdownGrabacion);
+            countdownGrabacion = null;
+        }
+    }
+
+    private void detenerGrabacionAudio(boolean ofrecerGuardar) {
+        cancelarCountdownGrabacion();
+        String picto = pictoGrabando;
+        boolean habiaGrabador = grabadorAudio != null;
+        if (habiaGrabador) {
+            try { grabadorAudio.stop(); } catch (RuntimeException ignored) { }
+            liberarGrabadorAudio();
+        }
+        pictoGrabando = null;
+        if (dialogoGrabacion != null) {
+            AlertDialog d = dialogoGrabacion;
+            dialogoGrabacion = null;
+            d.dismiss();
+        }
+        if (!ofrecerGuardar || picto == null) {
+            AudiosPictos.borrarTemp(this);
+            return;
+        }
+        File temp = AudiosPictos.tempGrabacion(this);
+        if (!temp.isFile() || temp.length() == 0) {
+            AudiosPictos.borrarTemp(this);
+            Toast.makeText(this, "No se grabó nada.", Toast.LENGTH_SHORT).show();
+            return;
+        }
+        mostrarConfirmacionAudio(picto);
+    }
+
+    private void liberarGrabadorAudio() {
+        if (grabadorAudio != null) {
+            try { grabadorAudio.reset(); } catch (RuntimeException ignored) { }
+            try { grabadorAudio.release(); } catch (RuntimeException ignored) { }
+            grabadorAudio = null;
+        }
+    }
+
+    private void mostrarConfirmacionAudio(String archivoPicto) {
+        new AlertDialog.Builder(this)
+                .setTitle("¿Guardar audio?")
+                .setMessage("Se guardará como " + AudiosPictos.nombreMp3(archivoPicto)
+                        + (AudiosPictos.existe(this, archivoPicto) ? "\n(reemplaza el audio anterior)" : ""))
+                .setPositiveButton("Guardar", (d, w) -> {
+                    if (AudiosPictos.confirmarTemp(this, archivoPicto)) {
+                        Toast.makeText(this, "Audio guardado.", Toast.LENGTH_SHORT).show();
+                        refrescarListaAudioPictos();
+                    } else {
+                        AudiosPictos.borrarTemp(this);
+                        Toast.makeText(this, "No se pudo guardar el audio.", Toast.LENGTH_SHORT).show();
+                    }
+                })
+                .setNeutralButton("Reintentar", (d, w) -> {
+                    AudiosPictos.borrarTemp(this);
+                    iniciarGrabacionAudio(archivoPicto);
+                })
+                .setNegativeButton("Descartar", (d, w) -> AudiosPictos.borrarTemp(this))
+                .setOnCancelListener(d -> AudiosPictos.borrarTemp(this))
+                .show();
+    }
+
+    private void pedirExportarAudios() {
+        int cantidad = AudiosPictos.listar(this).size();
+        if (cantidad == 0) {
+            Toast.makeText(this, "No hay audios para exportar.", Toast.LENGTH_SHORT).show();
+            return;
+        }
+        new AlertDialog.Builder(this)
+                .setTitle("Exportar audios")
+                .setMessage("Se copiarán " + cantidad + " archivo(s) a:\n"
+                        + AudiosPictos.rutaPublicaVisible()
+                        + "\n\nSi ya existen, se reemplazan.")
+                .setPositiveButton("Exportar", (d, w) -> exportarAudiosPublicos())
+                .setNegativeButton("Cancelar", null)
+                .show();
+    }
+
+    private void exportarAudiosPublicos() {
+        if (Build.VERSION.SDK_INT <= Build.VERSION_CODES.P
+                && checkSelfPermission(android.Manifest.permission.WRITE_EXTERNAL_STORAGE) != PackageManager.PERMISSION_GRANTED) {
+            requestPermissions(new String[]{android.Manifest.permission.WRITE_EXTERNAL_STORAGE}, PERMISO_EXPORT_AUDIOS);
+            return;
+        }
+        Toast.makeText(this, "Exportando audios…", Toast.LENGTH_SHORT).show();
+        new Thread(() -> {
+            try {
+                ExportadorPublico.Resultado r = AudiosPictos.exportarPublico(this);
+                runOnUiThread(() -> {
+                    if (r.exportados == 0) {
+                        Toast.makeText(this, "No hay audios para exportar.", Toast.LENGTH_SHORT).show();
+                    } else if (r.fallidos == 0) {
+                        Toast.makeText(this, "Exportados " + r.exportados + " a " + r.rutaVisible, Toast.LENGTH_LONG).show();
+                    } else {
+                        Toast.makeText(this, "Exportados " + r.exportados + ", fallaron " + r.fallidos
+                                + ".\nCarpeta: " + r.rutaVisible, Toast.LENGTH_LONG).show();
+                    }
+                });
+            } catch (IOException e) {
+                runOnUiThread(() -> Toast.makeText(this, "No se pudieron exportar los audios.", Toast.LENGTH_SHORT).show());
+            }
+        }).start();
+    }
+
+    private void pedirExportarPictos() {
+        int cantidad = PictosLocales.listar(this).size();
+        if (cantidad == 0) {
+            Toast.makeText(this, "No hay pictos propios para exportar.", Toast.LENGTH_SHORT).show();
+            return;
+        }
+        new AlertDialog.Builder(this)
+                .setTitle("Exportar pictos")
+                .setMessage("Se copiarán " + cantidad + " imagen(es) a:\n"
+                        + PictosLocales.rutaPublicaVisible()
+                        + "\n\nSi ya existen, se reemplazan.")
+                .setPositiveButton("Exportar", (d, w) -> exportarPictosPublicos())
+                .setNegativeButton("Cancelar", null)
+                .show();
+    }
+
+    private void exportarPictosPublicos() {
+        if (Build.VERSION.SDK_INT <= Build.VERSION_CODES.P
+                && checkSelfPermission(android.Manifest.permission.WRITE_EXTERNAL_STORAGE) != PackageManager.PERMISSION_GRANTED) {
+            requestPermissions(new String[]{android.Manifest.permission.WRITE_EXTERNAL_STORAGE}, PERMISO_EXPORT_PICTOS);
+            return;
+        }
+        Toast.makeText(this, "Exportando pictos…", Toast.LENGTH_SHORT).show();
+        new Thread(() -> {
+            try {
+                ExportadorPublico.Resultado r = PictosLocales.exportarPublico(this);
+                runOnUiThread(() -> {
+                    if (r.exportados == 0) {
+                        Toast.makeText(this, "No hay pictos propios para exportar.", Toast.LENGTH_SHORT).show();
+                    } else if (r.fallidos == 0) {
+                        Toast.makeText(this, "Exportados " + r.exportados + " a " + r.rutaVisible, Toast.LENGTH_LONG).show();
+                    } else {
+                        Toast.makeText(this, "Exportados " + r.exportados + ", fallaron " + r.fallidos
+                                + ".\nCarpeta: " + r.rutaVisible, Toast.LENGTH_LONG).show();
+                    }
+                });
+            } catch (IOException e) {
+                runOnUiThread(() -> Toast.makeText(this, "No se pudieron exportar los pictos.", Toast.LENGTH_SHORT).show());
+            }
+        }).start();
+    }
+
+    private void elegirOrigenFoto() {
+        if (escuchandoNombre) detenerEscuchaNombre();
+        mostrarListadoEdicion(false);
+        new AlertDialog.Builder(this)
+                .setTitle("Nueva foto")
+                .setItems(new CharSequence[]{"Tomar foto", "Buscar archivo"}, (d, which) -> {
+                    if (which == 0) pedirCamara();
+                    else buscarArchivoFoto();
+                })
+                .setNegativeButton("Cancelar", (d, w) -> {
+                    if (bitmapPendienteEdicion == null) mostrarListadoEdicion(true);
+                })
+                .setOnCancelListener(d -> {
+                    if (bitmapPendienteEdicion == null) mostrarListadoEdicion(true);
+                })
+                .show();
+    }
+
+    private void pedirCamara() {
+        if (checkSelfPermission(android.Manifest.permission.CAMERA) != PackageManager.PERMISSION_GRANTED) {
+            requestPermissions(new String[]{android.Manifest.permission.CAMERA}, PERMISO_CAMARA);
+            return;
+        }
+        lanzarCamara();
+    }
+
+    private void lanzarCamara() {
+        try {
+            File temp = new File(getCacheDir(), "captura_temp.jpg");
+            uriFotoCamara = FileProvider.getUriForFile(this, getPackageName() + ".fileprovider", temp);
+            Intent intent = new Intent(MediaStore.ACTION_IMAGE_CAPTURE);
+            intent.putExtra(MediaStore.EXTRA_OUTPUT, uriFotoCamara);
+            intent.addFlags(Intent.FLAG_GRANT_WRITE_URI_PERMISSION | Intent.FLAG_GRANT_READ_URI_PERMISSION);
+            for (ResolveInfo info : getPackageManager().queryIntentActivities(intent, PackageManager.MATCH_DEFAULT_ONLY)) {
+                grantUriPermission(info.activityInfo.packageName, uriFotoCamara,
+                        Intent.FLAG_GRANT_WRITE_URI_PERMISSION | Intent.FLAG_GRANT_READ_URI_PERMISSION);
+            }
+            if (intent.resolveActivity(getPackageManager()) == null) {
+                Toast.makeText(this, "No hay cámara disponible.", Toast.LENGTH_SHORT).show();
+                return;
+            }
+            startActivityForResult(intent, TOMAR_FOTO);
+        } catch (RuntimeException error) {
+            Toast.makeText(this, "No se pudo abrir la cámara.", Toast.LENGTH_SHORT).show();
+        }
+    }
+
+    private void buscarArchivoFoto() {
+        Intent intent = new Intent(Intent.ACTION_OPEN_DOCUMENT);
+        intent.addCategory(Intent.CATEGORY_OPENABLE);
+        intent.setType("image/*");
+        startActivityForResult(intent, ELEGIR_FOTO);
+    }
+
+    private void onFotoParaEdicion(Uri uri) {
+        if (uri == null) return;
+        new Thread(() -> {
+            Bitmap bitmap = PictosLocales.decodificarUri(this, uri, 1024);
+            runOnUiThread(() -> mostrarFotoPendiente(bitmap));
+        }).start();
+    }
+
+    private void mostrarFotoPendiente(Bitmap bitmap) {
+        if (bitmap == null) {
+            Toast.makeText(this, "No se pudo leer esa foto.", Toast.LENGTH_SHORT).show();
+            if (bitmapPendienteEdicion == null) mostrarListadoEdicion(true);
+            return;
+        }
+        if (bitmapPendienteEdicion != null && bitmapPendienteEdicion != bitmap) {
+            bitmapPendienteEdicion.recycle();
+        }
+        bitmapPendienteEdicion = bitmap;
+        mostrarListadoEdicion(false);
+        mostrarControlesEdicion(true);
+        botonCamaraEdicion.setVisibility(View.VISIBLE);
+        imagenPendienteEdicion.setVisibility(View.GONE);
+        imagenPendienteEdicion.setImageBitmap(bitmap);
+        if (imagenPreviewEdicion != null) {
+            imagenPreviewEdicion.setImageBitmap(bitmap);
+            imagenPreviewEdicion.setVisibility(View.VISIBLE);
+        }
+        nombrePendienteEdicion.setText("");
+        nombrePendienteEdicion.setVisibility(View.GONE);
+        botonOkPendienteEdicion.setVisibility(View.GONE);
+        cajaAccionesFotoEdicion.setVisibility(View.VISIBLE);
+        cajaPendienteEdicion.setVisibility(View.VISIBLE);
+        cajaRecorteEdicion.setVisibility(View.GONE);
+        habilitarMicroEdicion(false);
+    }
+
+    private void aceptarFotoPendiente() {
+        if (bitmapPendienteEdicion == null) return;
+        botonCamaraEdicion.setVisibility(View.GONE);
+        imagenPendienteEdicion.setImageBitmap(bitmapPendienteEdicion);
+        imagenPendienteEdicion.setVisibility(View.VISIBLE);
+        if (imagenPreviewEdicion != null) imagenPreviewEdicion.setVisibility(View.GONE);
+        cajaAccionesFotoEdicion.setVisibility(View.GONE);
+        cajaPendienteEdicion.setVisibility(View.VISIBLE);
+        nombrePendienteEdicion.setVisibility(View.VISIBLE);
+        botonOkPendienteEdicion.setVisibility(View.VISIBLE);
+        habilitarMicroEdicion(true);
+        nombrePendienteEdicion.requestFocus();
+        mostrarTeclado(nombrePendienteEdicion);
+    }
+
+    private void cancelarProcesoFoto() {
+        detenerEscuchaNombre();
+        cancelarPendienteEdicion();
+        mostrarControlesEdicion(true);
+        mostrarListadoEdicion(true);
+        habilitarMicroEdicion(false);
+    }
+
+    private void mostrarListadoEdicion(boolean visible) {
+        if (scrollEdicion != null) scrollEdicion.setVisibility(visible ? View.VISIBLE : View.GONE);
+        if (cajaRecorteEdicion != null && visible) cajaRecorteEdicion.setVisibility(View.GONE);
+    }
+
+    private void mostrarControlesEdicion(boolean visible) {
+        if (filaControlesEdicion != null) filaControlesEdicion.setVisibility(visible ? View.VISIBLE : View.GONE);
+    }
+
+    private void pedirRecorteFoto() {
+        if (bitmapPendienteEdicion == null) return;
+        mostrarControlesEdicion(false);
+        if (lanzarEditorExterno()) return;
+        iniciarRecorteInterno();
+    }
+
+    private boolean lanzarEditorExterno() {
+        try {
+            File origen = new File(getCacheDir(), "edicion_origen.jpg");
+            try (FileOutputStream out = new FileOutputStream(origen)) {
+                bitmapPendienteEdicion.compress(Bitmap.CompressFormat.JPEG, 92, out);
+            }
+            File destino = new File(getCacheDir(), "edicion_recorte.jpg");
+            uriFotoRecorte = FileProvider.getUriForFile(this, getPackageName() + ".fileprovider", destino);
+            Uri uriOrigen = FileProvider.getUriForFile(this, getPackageName() + ".fileprovider", origen);
+            Intent crop = new Intent("com.android.camera.action.CROP");
+            crop.setDataAndType(uriOrigen, "image/*");
+            crop.putExtra("crop", "true");
+            crop.putExtra("scale", true);
+            crop.putExtra("return-data", false);
+            crop.putExtra(MediaStore.EXTRA_OUTPUT, uriFotoRecorte);
+            crop.putExtra("outputFormat", Bitmap.CompressFormat.JPEG.toString());
+            crop.addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION | Intent.FLAG_GRANT_WRITE_URI_PERMISSION);
+            concederUriCamara(crop, uriOrigen);
+            concederUriCamara(crop, uriFotoRecorte);
+            if (crop.resolveActivity(getPackageManager()) != null) {
+                startActivityForResult(crop, RECORTAR_FOTO);
+                return true;
+            }
+            Intent edit = new Intent(Intent.ACTION_EDIT);
+            edit.setDataAndType(uriOrigen, "image/*");
+            edit.putExtra(MediaStore.EXTRA_OUTPUT, uriFotoRecorte);
+            edit.addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION | Intent.FLAG_GRANT_WRITE_URI_PERMISSION);
+            concederUriCamara(edit, uriOrigen);
+            concederUriCamara(edit, uriFotoRecorte);
+            if (edit.resolveActivity(getPackageManager()) != null) {
+                startActivityForResult(Intent.createChooser(edit, "Recortar foto"), RECORTAR_FOTO);
+                return true;
+            }
+        } catch (IOException | RuntimeException ignored) { }
+        return false;
+    }
+
+    private void concederUriCamara(Intent intent, Uri uri) {
+        if (uri == null) return;
+        for (ResolveInfo info : getPackageManager().queryIntentActivities(intent, PackageManager.MATCH_DEFAULT_ONLY)) {
+            grantUriPermission(info.activityInfo.packageName, uri,
+                    Intent.FLAG_GRANT_WRITE_URI_PERMISSION | Intent.FLAG_GRANT_READ_URI_PERMISSION);
+        }
+    }
+
+    private void iniciarRecorteInterno() {
+        mostrarControlesEdicion(false);
+        cajaPendienteEdicion.setVisibility(View.GONE);
+        cajaRecorteEdicion.setVisibility(View.VISIBLE);
+        vistaRecorteEdicion.setBitmap(bitmapPendienteEdicion);
+    }
+
+    private void aplicarRecorteInterno() {
+        Bitmap recortado = vistaRecorteEdicion.recortar();
+        cajaRecorteEdicion.setVisibility(View.GONE);
+        mostrarControlesEdicion(true);
+        if (recortado != null) mostrarFotoPendiente(recortado);
+        else if (bitmapPendienteEdicion != null) mostrarFotoPendiente(bitmapPendienteEdicion);
+    }
+
+    private void cancelarRecorteInterno() {
+        cajaRecorteEdicion.setVisibility(View.GONE);
+        mostrarControlesEdicion(true);
+        if (bitmapPendienteEdicion != null) mostrarFotoPendiente(bitmapPendienteEdicion);
+    }
+
+    private void habilitarMicroEdicion(boolean habilitado) {
+        if (botonMicroEdicionCaja == null) return;
+        botonMicroEdicionCaja.setEnabled(habilitado);
+        botonMicroEdicionCaja.setAlpha(habilitado ? 1f : 0.35f);
+        botonMicroEdicionCaja.setClickable(habilitado);
+    }
+
+    private void pedirEscuchaNombre() {
+        if (!botonMicroEdicionCaja.isEnabled() || bitmapPendienteEdicion == null) return;
+        if (escuchandoNombre) {
+            detenerEscuchaNombreYUsar();
+            return;
+        }
+        if (checkSelfPermission(android.Manifest.permission.RECORD_AUDIO) != PackageManager.PERMISSION_GRANTED) {
+            requestPermissions(new String[]{android.Manifest.permission.RECORD_AUDIO}, PERMISO_MICRO_NOMBRE);
+            return;
+        }
+        iniciarEscuchaNombre();
+    }
+
+    private void iniciarEscuchaNombre() {
+        if (!SpeechRecognizer.isRecognitionAvailable(this)) {
+            Toast.makeText(this, "Reconocimiento de voz no disponible.", Toast.LENGTH_SHORT).show();
+            return;
+        }
+        detenerEscuchaNombre();
+        reconocedorNombre = SpeechRecognizer.createSpeechRecognizer(this);
+        reconocedorNombre.setRecognitionListener(new RecognitionListener() {
+            @Override public void onReadyForSpeech(Bundle params) { }
+            @Override public void onBeginningOfSpeech() { }
+            @Override public void onRmsChanged(float rmsdB) {
+                runOnUiThread(() -> {
+                    if (!escuchandoNombre || botonMicroEdicion == null) return;
+                    float pulso = Math.max(0f, rmsdB) / 12f;
+                    float escala = 1f + pulso * 0.18f;
+                    botonMicroEdicion.setScaleX(escala);
+                    botonMicroEdicion.setScaleY(escala);
+                });
+            }
+            @Override public void onBufferReceived(byte[] buffer) { }
+            @Override public void onEndOfSpeech() { }
+            @Override public void onPartialResults(Bundle partialResults) {
+                String parcial = primerResultado(partialResults);
+                if (parcial != null && !parcial.trim().isEmpty()) {
+                    runOnUiThread(() -> nombrePendienteEdicion.setText(parcial.trim()));
+                }
+            }
+            @Override public void onEvent(int eventType, Bundle params) { }
+            @Override public void onError(int error) {
+                runOnUiThread(() -> {
+                    if (escuchandoNombre && segundosRestantesNombre > 0) {
+                        reiniciarEscuchaNombre();
+                        return;
+                    }
+                    finalizarEscuchaNombre();
+                });
+            }
+            @Override public void onResults(Bundle results) {
+                String texto = primerResultado(results);
+                runOnUiThread(() -> {
+                    if (texto != null && !texto.trim().isEmpty()) nombrePendienteEdicion.setText(texto.trim());
+                    if (escuchandoNombre && segundosRestantesNombre > 0) {
+                        reiniciarEscuchaNombre();
+                        return;
+                    }
+                    finalizarEscuchaNombre();
+                });
+            }
+        });
+        escuchandoNombre = true;
+        silenciarBeepsReconocedor();
+        actualizarIconoMicroEdicion(true);
+        iniciarCountdownNombre();
+        try {
+            reconocedorNombre.startListening(intentEscuchaNombre());
+        } catch (RuntimeException ignored) {
+            finalizarEscuchaNombre();
+        }
+    }
+
+    private Intent intentEscuchaNombre() {
+        Intent intent = new Intent(RecognizerIntent.ACTION_RECOGNIZE_SPEECH);
+        intent.putExtra(RecognizerIntent.EXTRA_LANGUAGE_MODEL, RecognizerIntent.LANGUAGE_MODEL_FREE_FORM);
+        intent.putExtra(RecognizerIntent.EXTRA_LANGUAGE, "es-AR");
+        intent.putExtra(RecognizerIntent.EXTRA_MAX_RESULTS, 1);
+        intent.putExtra(RecognizerIntent.EXTRA_PARTIAL_RESULTS, true);
+        return intent;
+    }
+
+    private void reiniciarEscuchaNombre() {
+        if (reconocedorNombre == null || !escuchandoNombre) return;
+        try {
+            reconocedorNombre.startListening(intentEscuchaNombre());
+        } catch (RuntimeException ignored) {
+            handlerEscucha.postDelayed(() -> {
+                if (reconocedorNombre == null || !escuchandoNombre) return;
+                try { reconocedorNombre.startListening(intentEscuchaNombre()); } catch (RuntimeException ignored2) { }
+            }, 250);
+        }
+    }
+
+    private void iniciarCountdownNombre() {
+        cancelarCountdownNombre();
+        segundosRestantesNombre = SEGUNDOS_MAX_NOMBRE;
+        actualizarTextoCountdownNombre();
+        countdownNombre = new Runnable() {
+            @Override public void run() {
+                if (!escuchandoNombre) return;
+                segundosRestantesNombre--;
+                if (segundosRestantesNombre <= 0) {
+                    actualizarTextoCountdownNombre();
+                    detenerEscuchaNombreYUsar();
+                    return;
+                }
+                actualizarTextoCountdownNombre();
+                handlerEscucha.postDelayed(this, 1000);
+            }
+        };
+        handlerEscucha.postDelayed(countdownNombre, 1000);
+    }
+
+    private void cancelarCountdownNombre() {
+        if (countdownNombre != null) {
+            handlerEscucha.removeCallbacks(countdownNombre);
+            countdownNombre = null;
+        }
+    }
+
+    private void actualizarTextoCountdownNombre() {
+        if (textoCountdownNombre == null) return;
+        if (escuchandoNombre) {
+            textoCountdownNombre.setVisibility(View.VISIBLE);
+            textoCountdownNombre.setText(String.valueOf(Math.max(0, segundosRestantesNombre)));
+        } else {
+            textoCountdownNombre.setVisibility(View.GONE);
+        }
+    }
+
+    private void actualizarIconoMicroEdicion(boolean escuchando) {
+        if (botonMicroEdicion == null) return;
+        if (animacionMicroNombre != null) {
+            animacionMicroNombre.stop();
+            animacionMicroNombre = null;
+        }
+        botonMicroEdicion.setScaleX(1f);
+        botonMicroEdicion.setScaleY(1f);
+        if (escuchando) {
+            Drawable anim = getResources().getDrawable(R.drawable.anim_escucha, getTheme());
+            botonMicroEdicion.setImageDrawable(anim);
+            if (anim instanceof AnimationDrawable) {
+                animacionMicroNombre = (AnimationDrawable) anim;
+                animacionMicroNombre.start();
+            }
+        } else {
+            Drawable icono = getResources().getDrawable(android.R.drawable.ic_btn_speak_now, getTheme()).mutate();
+            icono.setTint(0xff263238);
+            botonMicroEdicion.setImageDrawable(icono);
+        }
+        if (botonMicroEdicionCaja != null) {
+            botonMicroEdicionCaja.setBackground(fondoTecla(escuchando ? TECLA_PULSADA : TECLA_NORMAL));
+        }
+        actualizarTextoCountdownNombre();
+    }
+
+    private void detenerEscuchaNombreYUsar() {
+        if (!escuchandoNombre) return;
+        escuchandoNombre = false;
+        cancelarCountdownNombre();
+        if (reconocedorNombre != null) {
+            try { reconocedorNombre.stopListening(); } catch (RuntimeException ignored) { }
+        }
+        handlerEscucha.postDelayed(this::finalizarEscuchaNombre, 400);
+    }
+
+    private void finalizarEscuchaNombre() {
+        escuchandoNombre = false;
+        cancelarCountdownNombre();
+        restaurarBeepsReconocedor();
+        if (reconocedorNombre != null) {
+            try { reconocedorNombre.cancel(); } catch (RuntimeException ignored) { }
+            reconocedorNombre.destroy();
+            reconocedorNombre = null;
+        }
+        actualizarIconoMicroEdicion(false);
+        mostrarCampoNombrePendiente(nombrePendienteEdicion.getText().toString());
+    }
+
+    private void detenerEscuchaNombre() {
+        escuchandoNombre = false;
+        cancelarCountdownNombre();
+        restaurarBeepsReconocedor();
+        if (reconocedorNombre != null) {
+            try { reconocedorNombre.cancel(); } catch (RuntimeException ignored) { }
+            reconocedorNombre.destroy();
+            reconocedorNombre = null;
+        }
+        actualizarIconoMicroEdicion(false);
+    }
+
+    private void mostrarCampoNombrePendiente(String texto) {
+        nombrePendienteEdicion.setVisibility(View.VISIBLE);
+        botonOkPendienteEdicion.setVisibility(View.VISIBLE);
+        if (texto != null && !texto.trim().isEmpty()) nombrePendienteEdicion.setText(texto.trim());
+        nombrePendienteEdicion.requestFocus();
+        nombrePendienteEdicion.setSelection(nombrePendienteEdicion.getText().length());
+        mostrarTeclado(nombrePendienteEdicion);
+    }
+
+    private void confirmarPictoPendiente() {
+        if (bitmapPendienteEdicion == null) return;
+        String escrito = nombrePendienteEdicion.getText() == null ? "" : nombrePendienteEdicion.getText().toString();
+        String base = PictosLocales.sanitizarBase(escrito);
+        if (base.isEmpty()) {
+            Toast.makeText(this, "Escribí o decí un nombre.", Toast.LENGTH_SHORT).show();
+            mostrarCampoNombrePendiente(escrito);
+            return;
+        }
+        List<String> ocupados = PictosLocales.nombresArchivo(PictosLocales.listar(this));
+        String archivo = PictosLocales.siguienteNombrePng(ocupados, base);
+        Bitmap original = bitmapPendienteEdicion;
+        botonOkPendienteEdicion.setEnabled(false);
+        new Thread(() -> {
+            try {
+                Bitmap procesado = PictosLocales.procesarComoPicto(original);
+                PictosLocales.guardarPng(this, procesado, archivo);
+                if (procesado != null && procesado != original) procesado.recycle();
+                runOnUiThread(() -> {
+                    botonOkPendienteEdicion.setEnabled(true);
+                    cancelarPendienteEdicion();
+                    mostrarControlesEdicion(true);
+                    mostrarListadoEdicion(true);
+                    habilitarMicroEdicion(false);
+                    refrescarListaEdicion();
+                });
+            } catch (IOException error) {
+                runOnUiThread(() -> {
+                    botonOkPendienteEdicion.setEnabled(true);
+                    Toast.makeText(this, "No se pudo guardar la foto.", Toast.LENGTH_SHORT).show();
+                });
+            }
+        }).start();
+    }
+
+    private void cancelarPendienteEdicion() {
+        detenerEscuchaNombre();
+        if (imagenPendienteEdicion != null) {
+            imagenPendienteEdicion.setImageDrawable(null);
+            imagenPendienteEdicion.setVisibility(View.GONE);
+        }
+        if (imagenPreviewEdicion != null) {
+            imagenPreviewEdicion.setImageDrawable(null);
+            imagenPreviewEdicion.setVisibility(View.GONE);
+        }
+        if (botonCamaraEdicion != null) botonCamaraEdicion.setVisibility(View.VISIBLE);
+        if (nombrePendienteEdicion != null) nombrePendienteEdicion.setText("");
+        if (cajaPendienteEdicion != null) cajaPendienteEdicion.setVisibility(View.GONE);
+        if (cajaAccionesFotoEdicion != null) cajaAccionesFotoEdicion.setVisibility(View.GONE);
+        if (cajaRecorteEdicion != null) cajaRecorteEdicion.setVisibility(View.GONE);
+        if (nombrePendienteEdicion != null) nombrePendienteEdicion.setVisibility(View.GONE);
+        if (botonOkPendienteEdicion != null) botonOkPendienteEdicion.setVisibility(View.GONE);
+        if (bitmapPendienteEdicion != null) {
+            bitmapPendienteEdicion.recycle();
+            bitmapPendienteEdicion = null;
+        }
+    }
+
+    private void refrescarListaEdicion() {
+        if (listaPictosEdicion == null) return;
+        listaPictosEdicion.removeAllViews();
+        List<File> archivos = PictosLocales.listar(this);
+        if (archivos.isEmpty()) {
+            TextView vacio = new TextView(this);
+            vacio.setText("Todavía no hay fotos propias.");
+            vacio.setTextSize(16);
+            vacio.setGravity(Gravity.CENTER);
+            vacio.setPadding(0, dp(24), 0, dp(8));
+            listaPictosEdicion.addView(vacio);
+            return;
+        }
+        int indice = 0;
+        for (File archivo : archivos) listaPictosEdicion.addView(filaPictoLocal(archivo, indice++));
+    }
+
+    private View filaPictoLocal(File archivo, int indice) {
+        LinearLayout fila = nuevaFila();
+        fila.setBackground(fondoPalabra(indice, false));
+
+        ImageView imagen = new ImageView(this);
+        imagen.setScaleType(ImageView.ScaleType.CENTER_INSIDE);
+        imagen.setAdjustViewBounds(true);
+        imagen.setBackground(bordePicto());
+        imagen.setPadding(dp(3), dp(3), dp(3), dp(3));
+        Bitmap mini = PictosLocales.decodificarArchivo(archivo, TAM_MINIATURA_LISTA);
+        if (mini != null) imagen.setImageBitmap(mini);
+        fila.addView(imagen, fijo(dp(70), dp(70), dp(4)));
+
+        EditText nombre = new EditText(this);
+        nombre.setText(PictosLocales.baseSinSufijo(archivo.getName()));
+        nombre.setTextSize(18);
+        nombre.setTypeface(Typeface.DEFAULT_BOLD);
+        nombre.setBackgroundColor(Color.TRANSPARENT);
+        nombre.setSingleLine(true);
+        nombre.setImeOptions(EditorInfo.IME_ACTION_DONE);
+        nombre.setFocusable(false);
+        nombre.setFocusableInTouchMode(false);
+        nombre.setCursorVisible(false);
+        fila.addView(nombre, peso(1, -1, dp(4)));
+
+        ImageButton editarNombre = tabIcono(android.R.drawable.ic_menu_edit, "Editar nombre", v -> {
+            nombre.setFocusable(true);
+            nombre.setFocusableInTouchMode(true);
+            nombre.setCursorVisible(true);
+            nombre.requestFocus();
+            nombre.setSelection(nombre.getText().length());
+            mostrarTeclado(nombre);
+        });
+        fila.addView(editarNombre, fijo(dp(40), dp(40), 0));
+
+        nombre.setOnEditorActionListener((v, actionId, event) -> {
+            if (actionId == EditorInfo.IME_ACTION_DONE) {
+                renombrarPictoLocal(archivo, nombre.getText().toString());
+                return true;
+            }
+            return false;
+        });
+        nombre.setOnFocusChangeListener((v, tieneFoco) -> {
+            if (!tieneFoco && modoEdicion) renombrarPictoLocal(archivo, nombre.getText().toString());
+        });
+
+        ImageButton borrar = papelera("Eliminar foto");
+        borrar.setOnClickListener(v -> confirmarBorrarLocal(archivo));
+        fila.addView(borrar, fijo(dp(44), dp(44), 0));
+        return fila;
+    }
+
+    private void renombrarPictoLocal(File archivo, String nuevoTexto) {
+        if (archivo == null || !archivo.exists()) return;
+        String base = PictosLocales.sanitizarBase(nuevoTexto);
+        if (base.isEmpty() || base.equals(PictosLocales.baseSinSufijo(archivo.getName()))) {
+            ocultarTeclado();
+            return;
+        }
+        List<String> ocupados = PictosLocales.nombresArchivo(PictosLocales.listar(this));
+        ocupados.remove(archivo.getName());
+        String destino = PictosLocales.siguienteNombrePng(ocupados, base);
+        PictosLocales.renombrar(archivo, destino);
+        ocultarTeclado();
+        refrescarListaEdicion();
+    }
+
+    private void confirmarBorrarLocal(File archivo) {
+        new AlertDialog.Builder(this)
+                .setTitle("Eliminar foto")
+                .setMessage("¿Seguro que querés borrar esta foto?")
+                .setNegativeButton("Cancelar", null)
+                .setPositiveButton("Eliminar", (d, w) -> {
+                    if (archivo != null) archivo.delete();
+                    refrescarListaEdicion();
+                }).show();
+    }
+
+    private void mostrarTeclado(View campo) {
+        campo.post(() -> {
+            InputMethodManager imm = (InputMethodManager) getSystemService(INPUT_METHOD_SERVICE);
+            if (imm != null) imm.showSoftInput(campo, InputMethodManager.SHOW_IMPLICIT);
+        });
+    }
+
+    private void ocultarTeclado() {
+        View foco = getCurrentFocus();
+        InputMethodManager imm = (InputMethodManager) getSystemService(INPUT_METHOD_SERVICE);
+        if (imm != null && foco != null) imm.hideSoftInputFromWindow(foco.getWindowToken(), 0);
+    }
+
+    @Override public void onBackPressed() {
+        if (modoEdicion) {
+            guardarYSalirEdicion();
+            return;
+        }
+        if (overlayDisyuncion != null) {
+            cerrarDisyuncion(true);
+            return;
+        }
+        super.onBackPressed();
     }
 
     private void construirVistaJuego() {
         tabEleccionJuego.post(this::actualizarTabEleccionJuego);
-        List<String> usados = pictosUsadosEnFrases();
-        if (usados.isEmpty()) {
+        actualizarTecladoJuego();
+        refrescarMosaicoJuego();
+    }
+
+    private void actualizarTrasTeclaJuego() {
+        if (escuchandoVoz) return;
+        actualizarTecladoJuego();
+        refrescarMosaicoJuego();
+    }
+
+    private void actualizarTecladoJuego() {
+        tecladoJuegoContenedor.removeAllViews();
+        tecladoJuegoContenedor.addView(tecladoPredictivoJuego(catalogoBuscable));
+    }
+
+    private void refrescarMosaicoJuego() {
+        List<String> visibles = pictosVisiblesJuego();
+        if (visibles.isEmpty()) {
             mosaicoJuego.removeAllViews();
             TextView aviso = new TextView(this);
-            aviso.setText("Todavía no hay pictogramas usados en frases.");
+            if (filtroTecladoJuego.isEmpty())
+                aviso.setText("Todavía no hay pictogramas usados en frases.");
+            else
+                aviso.setText("Sin coincidencias.");
             aviso.setTextSize(18);
             aviso.setGravity(Gravity.CENTER);
             aviso.setPadding(dp(16), dp(40), dp(16), dp(16));
             mosaicoJuego.addView(aviso, new GridLayout.LayoutParams(GridLayout.spec(0), GridLayout.spec(0)));
             return;
         }
-        Runnable aplicar = () -> aplicarMosaicoJuego(usados);
+        Runnable aplicar = () -> aplicarMosaicoJuego(visibles);
         if (juegoPanel.getWidth() > 0) aplicar.run();
         else juegoPanel.post(aplicar);
+    }
+
+    /** Sin filtro: pictos usados en Frases. Con teclas: coincidencias del catálogo. */
+    private List<String> pictosVisiblesJuego() {
+        if (filtroTecladoJuego.isEmpty()) return pictosUsadosEnFrases();
+        List<String> r = new ArrayList<>();
+        for (String archivo : catalogoBuscable)
+            if (nombre(archivo).startsWith(filtroTecladoJuego)) r.add(archivo);
+        return r;
     }
 
     private int anchoUtilMosaicoJuego() {
@@ -1014,6 +2527,7 @@ public class MainActivity extends Activity {
         botonReciclajeJuego.setAlpha(haySeleccion ? 1f : .35f);
         botonEnviarJuego.setEnabled(haySeleccion);
         botonEnviarJuego.setAlpha(haySeleccion ? 1f : .35f);
+        botonDisyuncionJuego.setVisibility(seleccionJuego.size() == 2 ? View.VISIBLE : View.GONE);
     }
 
     private View slotVacioJuego() {
@@ -1057,18 +2571,21 @@ public class MainActivity extends Activity {
         if (destino == null) return;
         animandoEleccionJuego = true;
         int lado = destino.getWidth() > 0 ? destino.getWidth() : ladoSlotTab();
+        int anchoOrigen = origen.getWidth();
+        int altoOrigen = origen.getHeight();
         int[] locOrigen = new int[2], locDestino = new int[2], locRaiz = new int[2];
         origen.getLocationOnScreen(locOrigen);
         destino.getLocationOnScreen(locDestino);
         FrameLayout raiz = (FrameLayout) contenido.getParent();
         raiz.getLocationOnScreen(locRaiz);
+        if (!filtroTecladoJuego.isEmpty()) liberarFiltroJuego();
         FrameLayout copia = new FrameLayout(this);
         copia.setElevation(dp(8));
         ImageView img = imagen(archivo);
         copia.addView(img, new FrameLayout.LayoutParams(-1, -1));
         FrameLayout.LayoutParams lp = new FrameLayout.LayoutParams(lado, lado);
-        lp.leftMargin = locOrigen[0] - locRaiz[0] + (origen.getWidth() - lado) / 2;
-        lp.topMargin = locOrigen[1] - locRaiz[1] + (origen.getHeight() - lado) / 2;
+        lp.leftMargin = locOrigen[0] - locRaiz[0] + (anchoOrigen - lado) / 2;
+        lp.topMargin = locOrigen[1] - locRaiz[1] + (altoOrigen - lado) / 2;
         raiz.addView(copia, lp);
         sonidoEleccionJuego();
         float dx = locDestino[0] - locOrigen[0] + (destino.getWidth() - lado) / 2;
@@ -1106,6 +2623,11 @@ public class MainActivity extends Activity {
         ejecutar(items, this::mostrarJuego);
     }
 
+    private void ejecutarDisyuncionJuego() {
+        if (animandoEleccionJuego || seleccionJuego.size() != 2) return;
+        ejecutarDisyuncion(new PhraseRecord(copiar(seleccionJuego)));
+    }
+
     private View filaPalabra(PhraseRecord.Item item, int indice) {
         if (item.automatico) return filaPalabraAutomatica(item, indice);
         LinearLayout fila=nuevaFila(); fila.setBackground(fondoPalabra(indice, true));
@@ -1128,6 +2650,18 @@ public class MainActivity extends Activity {
         icono.setOnClickListener(v->{item.negado=!item.negado;raya.setVisibility(item.negado?View.VISIBLE:View.GONE);icono.setContentDescription((item.negado ? "Afirmar " : "Negar ") + nombre(item.archivo));});
         fila.addView(icono,fijo(dp(70),dp(70),dp(4)));
         TextView nombre=new TextView(this); nombre.setText(nombre(item.archivo)); nombre.setTextSize(20f * 1.12f); nombre.setTypeface(nombre.getTypeface(), Typeface.BOLD); nombre.setGravity(Gravity.CENTER_VERTICAL); fila.addView(nombre,peso(1,-1,dp(4)));
+        List<String> variantes = variantesDe(item.archivo);
+        if (variantes.size() > 1) {
+            TextView cambiar = botonMasVariante();
+            cambiar.setOnClickListener(v -> {
+                item.archivo = siguienteVariante(item.archivo);
+                Bitmap bmp = obtenerMiniatura(item.archivo);
+                if (bmp != null) imagen.setImageBitmap(bmp);
+                imagen.setContentDescription(nombre(item.archivo));
+                icono.setContentDescription((item.negado ? "Afirmar " : "Negar ") + nombre(item.archivo));
+            });
+            fila.addView(cambiar, fijo(dp(40), dp(40), 0));
+        }
         configurarArrastrePalabra(fila, item, icono, nombre);
         ImageButton papelera=papelera("Quitar una selección"); papelera.setOnClickListener(v->quitar(item)); fila.addView(papelera,fijo(dp(54),dp(54),0)); return fila;
     }
@@ -1267,7 +2801,8 @@ public class MainActivity extends Activity {
         h.setHorizontalScrollBarEnabled(false);
         h.setFillViewport(true);
         // Deja hueco mínimo a los costados; los controles van superpuestos.
-        h.setPadding(dp(26), dp(2), dp(68), dp(2));
+        boolean dosPictos = cantidadReales(frase.items) == 2;
+        h.setPadding(dp(26), dp(2), dosPictos ? dp(148) : dp(68), dp(2));
         LinearLayout iconos = new LinearLayout(this);
         iconos.setGravity(Gravity.CENTER_VERTICAL);
         h.addView(iconos, new FrameLayout.LayoutParams(-2, -1));
@@ -1306,8 +2841,22 @@ public class MainActivity extends Activity {
         borrar.setOnClickListener(v -> confirmar(frase));
         acciones.addView(borrar, new LinearLayout.LayoutParams(dp(34), dp(34)));
 
+        LinearLayout derecha = new LinearLayout(this);
+        derecha.setOrientation(LinearLayout.HORIZONTAL);
+        derecha.setGravity(Gravity.CENTER_VERTICAL);
+        if (dosPictos) {
+            Button disyuncion = tecla("Disyunción", TECLA_NORMAL, v -> {
+                if (!escuchandoVoz && !modoEdicion) ejecutarDisyuncion(frase);
+            });
+            disyuncion.setTextSize(TypedValue.COMPLEX_UNIT_SP, 11);
+            disyuncion.setContentDescription("Elegir entre los dos pictogramas");
+            LinearLayout.LayoutParams dpDis = new LinearLayout.LayoutParams(dp(92), dp(40));
+            dpDis.rightMargin = dp(4);
+            derecha.addView(disyuncion, dpDis);
+        }
+        derecha.addView(acciones);
         FrameLayout.LayoutParams ap = new FrameLayout.LayoutParams(-2, -2, Gravity.END | Gravity.CENTER_VERTICAL);
-        marco.addView(acciones, ap);
+        marco.addView(derecha, ap);
 
         if (seleccionada) {
             TextView asa = new TextView(this);
@@ -1495,6 +3044,11 @@ public class MainActivity extends Activity {
     }
 
     private Bitmap decodificarPicto(String archivo, int tamMaximo) {
+        File local = pictosLocales.get(archivo);
+        if (local != null) {
+            Bitmap desdeArchivo = PictosLocales.decodificarArchivo(local, tamMaximo);
+            if (desdeArchivo != null) return desdeArchivo;
+        }
         String ruta = DIR + "/" + archivo;
         try {
             BitmapFactory.Options limites = new BitmapFactory.Options();
@@ -1654,6 +3208,213 @@ public class MainActivity extends Activity {
     }
 
     private float getTouchSlop(){return ViewConfiguration.get(this).getScaledTouchSlop();}
+
+    private void ejecutarDisyuncion(PhraseRecord frase) {
+        List<PhraseRecord.Item> reales = soloReales(frase.items);
+        if (reales.size() != 2 || overlayDisyuncion != null) return;
+        FrameLayout raiz = (FrameLayout) contenido.getParent();
+        if (raiz == null) return;
+        raiz.setClipChildren(false);
+        raiz.setClipToPadding(false);
+        eleccionDisyuncionHecha = false;
+        contenido.setVisibility(View.GONE);
+
+        FrameLayout overlay = new FrameLayout(this);
+        overlay.setBackgroundColor(0xff263238);
+        overlay.setClipChildren(false);
+        overlay.setClipToPadding(false);
+        overlayDisyuncion = overlay;
+
+        View fondo = new View(this);
+        fondo.setBackgroundColor(Color.TRANSPARENT);
+        overlay.addView(fondo, new FrameLayout.LayoutParams(-1, -1));
+
+        LinearLayout fila = new LinearLayout(this);
+        fila.setGravity(Gravity.CENTER);
+        fila.setClipChildren(false);
+        fila.setClipToPadding(false);
+        int lado = dp(158);
+        int separacion = dp(36);
+        PhraseRecord.Item itemA = reales.get(0);
+        PhraseRecord.Item itemB = reales.get(1);
+        View pictoA = picto(itemA, false, lado, 0, true);
+        View pictoB = picto(itemB, false, lado, 0, true);
+        pictoA.setClickable(false);
+        pictoB.setClickable(false);
+        fila.addView(pictoA);
+        View hueco = new View(this);
+        fila.addView(hueco, new LinearLayout.LayoutParams(separacion, 1));
+        fila.addView(pictoB);
+        overlay.addView(fila, new FrameLayout.LayoutParams(-1, -1));
+
+        Button ok = new Button(this);
+        ok.setText("OK");
+        ok.setTextSize(18);
+        ok.setAllCaps(false);
+        ok.setTextColor(0xff263238);
+        ok.setBackground(fondoSolapa(true));
+        ok.setVisibility(View.GONE);
+        ok.setEnabled(false);
+        ok.setOnClickListener(v -> cerrarDisyuncion(true));
+        FrameLayout.LayoutParams okParams = new FrameLayout.LayoutParams(-1, dp(52), Gravity.BOTTOM);
+        okParams.setMargins(dp(16), 0, dp(16), dp(18));
+        overlay.addView(ok, okParams);
+
+        prepararEntradaDisyuncion(pictoA);
+        prepararEntradaDisyuncion(pictoB);
+        raiz.addView(overlay, new FrameLayout.LayoutParams(-1, -1));
+
+        animarEntradaDisyuncion(pictoA, 0);
+        animarEntradaDisyuncion(pictoB, 90);
+        handlerEscucha.postDelayed(() -> {
+            if (overlayDisyuncion != overlay || eleccionDisyuncionHecha) return;
+            pictoA.setClickable(true);
+            pictoB.setClickable(true);
+            pictoA.setOnClickListener(v -> elegirPictoDisyuncion(pictoA, pictoB, itemA, itemB, fondo, ok, overlay));
+            pictoB.setOnClickListener(v -> elegirPictoDisyuncion(pictoB, pictoA, itemB, itemA, fondo, ok, overlay));
+        }, 620);
+    }
+
+    private void prepararEntradaDisyuncion(View picto) {
+        picto.setScaleX(0.12f);
+        picto.setScaleY(0.12f);
+        picto.setAlpha(0f);
+        picto.setTranslationY(dp(28));
+    }
+
+    private void animarEntradaDisyuncion(View picto, long delay) {
+        picto.animate()
+                .scaleX(1f).scaleY(1f).alpha(1f).translationY(0)
+                .setStartDelay(delay)
+                .setDuration(520)
+                .setInterpolator(new DecelerateInterpolator())
+                .start();
+    }
+
+    private void elegirPictoDisyuncion(View elegido, View otro, PhraseRecord.Item itemElegido,
+            PhraseRecord.Item itemOtro, View fondo, Button ok, View overlay) {
+        if (eleccionDisyuncionHecha || overlayDisyuncion != overlay) return;
+        eleccionDisyuncionHecha = true;
+        elegido.setClickable(false);
+        otro.setClickable(false);
+
+        float ancho = getResources().getDisplayMetrics().widthPixels;
+        int[] locElegido = new int[2];
+        int[] locOtro = new int[2];
+        elegido.getLocationOnScreen(locElegido);
+        otro.getLocationOnScreen(locOtro);
+        float dx = ancho / 2f - (locElegido[0] + elegido.getWidth() / 2f);
+        float saleX = (locOtro[0] + otro.getWidth() / 2f) < ancho / 2f ? -ancho : ancho;
+        elegido.setPivotX(elegido.getWidth() / 2f);
+        elegido.setPivotY(elegido.getHeight() / 2f);
+
+        elegido.animate()
+                .translationX(elegido.getTranslationX() + dx)
+                .scaleX(1.35f).scaleY(1.35f)
+                .setDuration(480)
+                .setInterpolator(new DecelerateInterpolator())
+                .start();
+        otro.animate()
+                .translationX(otro.getTranslationX() + saleX * 0.55f)
+                .alpha(0f)
+                .setDuration(420)
+                .setInterpolator(new DecelerateInterpolator())
+                .start();
+
+        int colorFondo;
+        int tipoSonido;
+        if (itemElegido.negado) {
+            colorFondo = 0xE6B71C1C;
+            tipoSonido = 1;
+        } else if (itemOtro.negado) {
+            colorFondo = 0xE62E7D32;
+            tipoSonido = 2;
+        } else {
+            colorFondo = 0xE6F9A825;
+            tipoSonido = 3;
+        }
+        ObjectAnimator.ofArgb(fondo, "backgroundColor", 0x00000000, colorFondo)
+                .setDuration(420)
+                .start();
+        sonarDisyuncion(tipoSonido);
+        handlerEscucha.postDelayed(() -> {
+            if (overlayDisyuncion != overlay) return;
+            ok.setVisibility(View.VISIBLE);
+            ok.setEnabled(true);
+        }, 500);
+    }
+
+    private void sonarDisyuncion(int tipo) {
+        String base = tipo == 1 ? "mal" : tipo == 2 ? "bien" : "ok";
+        if (reproducirSonidoAsset("sonidos/" + base + ".mp3")
+                || reproducirSonidoAsset("sonidos/" + base + ".ogg")
+                || reproducirSonidoAsset("sonidos/" + base + ".wav")) {
+            return;
+        }
+        try {
+            if (sonidoJuego == null) sonidoJuego = new ToneGenerator(AudioManager.STREAM_MUSIC, 80);
+            if (tipo == 1) {
+                sonidoJuego.startTone(ToneGenerator.TONE_CDMA_SOFT_ERROR_LITE, 420);
+                handlerEscucha.postDelayed(() -> {
+                    if (sonidoJuego != null) sonidoJuego.startTone(ToneGenerator.TONE_SUP_ERROR, 280);
+                }, 240);
+            } else if (tipo == 2) {
+                sonidoJuego.startTone(ToneGenerator.TONE_CDMA_CONFIRM, 320);
+                handlerEscucha.postDelayed(() -> {
+                    if (sonidoJuego != null) sonidoJuego.startTone(ToneGenerator.TONE_PROP_ACK, 200);
+                }, 200);
+            } else {
+                sonidoJuego.startTone(ToneGenerator.TONE_PROP_BEEP, 200);
+            }
+        } catch (RuntimeException ignored) { }
+    }
+
+    private boolean reproducirSonidoAsset(String ruta) {
+        try {
+            android.content.res.AssetFileDescriptor afd = getAssets().openFd(ruta);
+            if (sonidoDisyuncion != null) {
+                sonidoDisyuncion.release();
+                sonidoDisyuncion = null;
+            }
+            MediaPlayer player = new MediaPlayer();
+            player.setDataSource(afd.getFileDescriptor(), afd.getStartOffset(), afd.getLength());
+            afd.close();
+            player.setOnCompletionListener(mp -> {
+                mp.release();
+                if (sonidoDisyuncion == mp) sonidoDisyuncion = null;
+            });
+            player.prepare();
+            player.start();
+            sonidoDisyuncion = player;
+            return true;
+        } catch (IOException ignored) {
+            return false;
+        }
+    }
+
+    private void cerrarDisyuncion(boolean volver) {
+        if (overlayDisyuncion == null) {
+            if (volver) volverTrasDisyuncion();
+            return;
+        }
+        if (sonidoDisyuncion != null) {
+            sonidoDisyuncion.release();
+            sonidoDisyuncion = null;
+        }
+        View overlay = overlayDisyuncion;
+        overlayDisyuncion = null;
+        eleccionDisyuncionHecha = false;
+        ViewParent padre = overlay.getParent();
+        if (padre instanceof ViewGroup) ((ViewGroup) padre).removeView(overlay);
+        contenido.setVisibility(View.VISIBLE);
+        if (volver) volverTrasDisyuncion();
+    }
+
+    private void volverTrasDisyuncion() {
+        if (solapaActual == SOLAPA_JUEGO) mostrarJuego();
+        else mostrarFrases();
+    }
+
     private void confirmar(PhraseRecord frase) {
         new AlertDialog.Builder(this).setTitle("Eliminar frase").setMessage("¿Seguro que querés borrar esta frase?")
                 .setNegativeButton("Cancelar", null)
@@ -1682,7 +3443,35 @@ public class MainActivity extends Activity {
 
     @Override protected void onActivityResult(int codigo, int resultado, Intent datos) {
         super.onActivityResult(codigo, resultado, datos);
-        if (codigo != ELEGIR_RESPALDO || resultado != RESULT_OK || datos == null || datos.getData() == null) return;
+        if (resultado != RESULT_OK) {
+            if ((codigo == TOMAR_FOTO || codigo == ELEGIR_FOTO) && bitmapPendienteEdicion == null) {
+                mostrarListadoEdicion(true);
+            }
+            if (codigo == RECORTAR_FOTO) {
+                mostrarControlesEdicion(true);
+                if (bitmapPendienteEdicion != null) mostrarFotoPendiente(bitmapPendienteEdicion);
+            }
+            return;
+        }
+        if (codigo == TOMAR_FOTO) {
+            onFotoParaEdicion(uriFotoCamara);
+            return;
+        }
+        if (codigo == ELEGIR_FOTO && datos != null && datos.getData() != null) {
+            onFotoParaEdicion(datos.getData());
+            return;
+        }
+        if (codigo == RECORTAR_FOTO) {
+            Uri recorte = uriFotoRecorte;
+            if ((recorte == null || !archivoUriExiste(recorte)) && datos != null && datos.getData() != null) {
+                recorte = datos.getData();
+            }
+            if (recorte != null) onFotoParaEdicion(recorte);
+            else if (bitmapPendienteEdicion != null) mostrarFotoPendiente(bitmapPendienteEdicion);
+            mostrarControlesEdicion(true);
+            return;
+        }
+        if (codigo != ELEGIR_RESPALDO || datos == null || datos.getData() == null) return;
         Uri uri = datos.getData();
         int permisos = datos.getFlags() & (Intent.FLAG_GRANT_READ_URI_PERMISSION | Intent.FLAG_GRANT_WRITE_URI_PERMISSION);
         try { getContentResolver().takePersistableUriPermission(uri, permisos); } catch (SecurityException ignored) { }
@@ -1694,6 +3483,15 @@ public class MainActivity extends Activity {
                 runOnUiThread(() -> confirmarRestauracion(validas, descartadas, uri));
             } catch (Exception error) { runOnUiThread(() -> Toast.makeText(this, "No se pudo leer ese respaldo.", Toast.LENGTH_LONG).show()); }
         }).start();
+    }
+
+    private boolean archivoUriExiste(Uri uri) {
+        if (uri == null) return false;
+        try (InputStream stream = getContentResolver().openInputStream(uri)) {
+            return stream != null;
+        } catch (IOException ignored) {
+            return false;
+        }
     }
 
     private void confirmarRestauracion(List<PhraseRecord> validas, int descartadas, Uri uri) {
@@ -1751,9 +3549,35 @@ public class MainActivity extends Activity {
         super.onRequestPermissionsResult(codigo, permisos, resultados);
         if (resultados.length == 0) return;
         if (codigo == PERMISO_DESCARGAS && resultados[0] == PackageManager.PERMISSION_GRANTED) guardarRespaldo();
+        if (codigo == PERMISO_EXPORT_AUDIOS) {
+            if (resultados[0] == PackageManager.PERMISSION_GRANTED) exportarAudiosPublicos();
+            else Toast.makeText(this, "Se necesita permiso de almacenamiento.", Toast.LENGTH_SHORT).show();
+        }
+        if (codigo == PERMISO_EXPORT_PICTOS) {
+            if (resultados[0] == PackageManager.PERMISSION_GRANTED) exportarPictosPublicos();
+            else Toast.makeText(this, "Se necesita permiso de almacenamiento.", Toast.LENGTH_SHORT).show();
+        }
         if (codigo == PERMISO_MICRO) {
             if (resultados[0] == PackageManager.PERMISSION_GRANTED) iniciarEscucha();
             else Toast.makeText(this, "Se necesita permiso de micrófono.", Toast.LENGTH_SHORT).show();
+        }
+        if (codigo == PERMISO_CAMARA) {
+            if (resultados[0] == PackageManager.PERMISSION_GRANTED) lanzarCamara();
+            else Toast.makeText(this, "Se necesita permiso de cámara.", Toast.LENGTH_SHORT).show();
+        }
+        if (codigo == PERMISO_MICRO_NOMBRE) {
+            if (resultados[0] == PackageManager.PERMISSION_GRANTED) iniciarEscuchaNombre();
+            else Toast.makeText(this, "Se necesita permiso de micrófono.", Toast.LENGTH_SHORT).show();
+        }
+        if (codigo == PERMISO_MICRO_AUDIO) {
+            if (resultados[0] == PackageManager.PERMISSION_GRANTED) {
+                String picto = pictoPendienteGrabar;
+                pictoPendienteGrabar = null;
+                if (picto != null) iniciarGrabacionAudio(picto);
+            } else {
+                pictoPendienteGrabar = null;
+                Toast.makeText(this, "Se necesita permiso de micrófono.", Toast.LENGTH_SHORT).show();
+            }
         }
     }
 
@@ -1808,6 +3632,74 @@ public class MainActivity extends Activity {
         return cantidad;
     }
 
+    /** Pictos que se ven con el mismo nombre (dolor.png y dolor (2).png). */
+    private List<String> variantesDe(String archivo) {
+        if (archivo == null || archivo.isEmpty()) return Collections.emptyList();
+        String clave = nombre(archivo);
+        List<String> variantes = new ArrayList<>();
+        for (String candidato : catalogoBuscable) {
+            if (clave.equals(nombre(candidato))) variantes.add(candidato);
+        }
+        Collections.sort(variantes, (a, b) -> {
+            int porNumero = Integer.compare(numeroVariante(a), numeroVariante(b));
+            return porNumero != 0 ? porNumero : a.compareToIgnoreCase(b);
+        });
+        return variantes;
+    }
+
+    /** Entre variantes del mismo nombre, la más usada en frases; si empatan, la sin (2)/(3). */
+    private String varianteMasUsada(String archivo) {
+        List<String> variantes = variantesDe(archivo);
+        if (variantes.isEmpty()) return archivo;
+        String mejor = variantes.get(0);
+        int maxUsos = usosEnFrases(mejor);
+        for (int i = 1; i < variantes.size(); i++) {
+            String candidato = variantes.get(i);
+            int usos = usosEnFrases(candidato);
+            if (usos > maxUsos) {
+                maxUsos = usos;
+                mejor = candidato;
+            }
+        }
+        return mejor;
+    }
+
+    private String siguienteVariante(String archivo) {
+        List<String> variantes = variantesDe(archivo);
+        if (variantes.size() <= 1) return archivo;
+        int indice = variantes.indexOf(archivo);
+        if (indice < 0) return variantes.get(0);
+        return variantes.get((indice + 1) % variantes.size());
+    }
+
+    /** dolor.png → 1; dolor (2).png → 2. */
+    private static int numeroVariante(String archivo) {
+        int cierre = archivo.lastIndexOf(')');
+        int apertura = archivo.lastIndexOf('(');
+        if (apertura < 0 || cierre <= apertura) return 1;
+        try {
+            return Integer.parseInt(archivo.substring(apertura + 1, cierre));
+        } catch (NumberFormatException ignored) {
+            return 1;
+        }
+    }
+
+    private TextView botonMasVariante() {
+        TextView boton = new TextView(this);
+        boton.setText("+");
+        boton.setTextSize(TypedValue.COMPLEX_UNIT_SP, 22);
+        boton.setTypeface(Typeface.DEFAULT_BOLD);
+        boton.setGravity(Gravity.CENTER);
+        boton.setTextColor(0xff263238);
+        boton.setContentDescription("Cambiar imagen del pictograma");
+        GradientDrawable fondo = new GradientDrawable();
+        fondo.setColor(0xffffffff);
+        fondo.setCornerRadius(dp(8));
+        fondo.setStroke(dp(1), 0xff718596);
+        boton.setBackground(fondo);
+        return boton;
+    }
+
     private int usoAjustado(String archivo) {
         int cantidad = usosEnFrases(archivo);
         for (PhraseRecord.Item item : borrador)
@@ -1817,34 +3709,42 @@ public class MainActivity extends Activity {
 
     /** Teclado QWERTY que muestra pulsadas las letras que forman el filtro actual. */
     private View tecladoPredictivo(List<String> disponibles) {
-        boolean lleno = false;
+        return construirTecladoPredictivo(disponibles, filtroTeclado, false);
+    }
+
+    private View tecladoPredictivoJuego(List<String> disponibles) {
+        return construirTecladoPredictivo(disponibles, filtroTecladoJuego, true);
+    }
+
+    private View construirTecladoPredictivo(List<String> disponibles, String filtro, boolean paraJuego) {
         LinearLayout panel = new LinearLayout(this); panel.setOrientation(LinearLayout.VERTICAL);
         panel.setPadding(dp(8), dp(6), dp(8), dp(6)); panel.setBackground(fondoTeclado());
         LinearLayout.LayoutParams panelParams = new LinearLayout.LayoutParams(-1, -2);
         panelParams.setMargins(0, dp(5), 0, dp(5)); panel.setLayoutParams(panelParams);
 
         LinearLayout controles = new LinearLayout(this); controles.setGravity(Gravity.CENTER);
-        Button liberar = tecla("Soltar todas", TECLA_NORMAL, lleno ? null : v -> liberarFiltro());
-        boolean soltarActivo = !lleno && !filtroTeclado.isEmpty();
+        Button liberar = tecla("Soltar todas", TECLA_NORMAL,
+                v -> { if (paraJuego) liberarFiltroJuego(); else liberarFiltro(); });
+        boolean soltarActivo = !filtro.isEmpty();
         liberar.setEnabled(soltarActivo); liberar.setAlpha(soltarActivo ? 1f : .35f);
         controles.addView(liberar, peso(1, dp(28), dp(1)));
         panel.addView(controles);
 
         Set<Character> iniciales = caracteresIniciales(disponibles);
-        if (lleno) {
-            agregarFilaTeclado(panel, "QWERTYUIOP", Collections.emptySet(), iniciales, false);
-            agregarFilaTeclado(panel, "ASDFGHJKLÑ", Collections.emptySet(), iniciales, false);
-            agregarFilaTeclado(panel, "ZXCVBNM ", Collections.emptySet(), iniciales, false);
-        } else {
-            Set<Character> siguientes = siguientesCaracteres(disponibles);
-            agregarFilaTeclado(panel, "QWERTYUIOP", siguientes, iniciales, true);
-            agregarFilaTeclado(panel, "ASDFGHJKLÑ", siguientes, iniciales, true);
-            agregarFilaTeclado(panel, "ZXCVBNM ", siguientes, iniciales, true);
-        }
+        Set<Character> siguientes = siguientesCaracteres(disponibles, filtro);
+        agregarFilaTeclado(panel, "QWERTYUIOP", siguientes, iniciales, true, filtro, paraJuego);
+        agregarFilaTeclado(panel, "ASDFGHJKLÑ", siguientes, iniciales, true, filtro, paraJuego);
+        agregarFilaTeclado(panel, "ZXCVBNM ", siguientes, iniciales, true, filtro, paraJuego);
         return panel;
     }
 
     private void liberarFiltro() { if (escuchandoVoz) return; filtroTeclado=""; actualizarTrasTecla(); }
+
+    private void liberarFiltroJuego() {
+        if (escuchandoVoz) return;
+        filtroTecladoJuego = "";
+        actualizarTrasTeclaJuego();
+    }
 
     /** Espacio se muestra como "_" para que la tecla sea visible. */
     private String etiquetaTecla(char letra) { return letra == ' ' ? "_" : String.valueOf(letra); }
@@ -1856,9 +3756,16 @@ public class MainActivity extends Activity {
         actualizarTrasTecla();
     }
 
-    private void agregarFilaTeclado(LinearLayout panel, String letras, Set<Character> siguientes, Set<Character> iniciales, boolean habilitado) {
+    private void borrarUltimaTeclaJuego() {
+        if (escuchandoVoz) return;
+        if (filtroTecladoJuego.isEmpty()) return;
+        filtroTecladoJuego = filtroTecladoJuego.substring(0, filtroTecladoJuego.length() - 1);
+        actualizarTrasTeclaJuego();
+    }
+
+    private void agregarFilaTeclado(LinearLayout panel, String letras, Set<Character> siguientes, Set<Character> iniciales, boolean habilitado, String filtro, boolean paraJuego) {
         LinearLayout fila = new LinearLayout(this); fila.setGravity(Gravity.CENTER);
-        char ultima = filtroTeclado.isEmpty() ? 0 : filtroTeclado.charAt(filtroTeclado.length() - 1);
+        char ultima = filtro.isEmpty() ? 0 : filtro.charAt(filtro.length() - 1);
         for (int i=0; i<letras.length(); i++) {
             char letra = letras.charAt(i);
             String etiqueta = etiquetaTecla(letra);
@@ -1868,7 +3775,7 @@ public class MainActivity extends Activity {
                 fila.addView(inactiva, peso(1, dp(31), dp(1)));
                 continue;
             }
-            int seleccionadas = cantidadDeLetra(letra);
+            int seleccionadas = cantidadDeLetra(letra, filtro);
             boolean disponible = siguientes.contains(letra);
             // Espacio siempre forma parte del teclado (pictos con varias palabras).
             boolean enTecladoOriginal = iniciales.contains(letra) || letra == ' ';
@@ -1880,7 +3787,8 @@ public class MainActivity extends Activity {
                 // Solo la copia que representa la última letra tipada se puede deshacer.
                 boolean esUltima = letra == ultima && copia == seleccionadas - 1;
                 if (esUltima) {
-                    Button deshacer = tecla(etiqueta, TECLA_ULTIMA, v -> borrarUltimaTecla());
+                    Button deshacer = tecla(etiqueta, TECLA_ULTIMA,
+                            v -> { if (paraJuego) borrarUltimaTeclaJuego(); else borrarUltimaTecla(); });
                     deshacer.setContentDescription("Borrar última letra");
                     fila.addView(deshacer, peso(1, dp(31), dp(1)));
                 } else {
@@ -1889,7 +3797,15 @@ public class MainActivity extends Activity {
                 }
             }
             if (disponible) {
-                Button opcion = tecla(etiqueta, TECLA_NORMAL, v -> { filtroTeclado += letra; actualizarTrasTecla(); });
+                Button opcion = tecla(etiqueta, TECLA_NORMAL, v -> {
+                    if (paraJuego) {
+                        filtroTecladoJuego += letra;
+                        actualizarTrasTeclaJuego();
+                    } else {
+                        filtroTeclado += letra;
+                        actualizarTrasTecla();
+                    }
+                });
                 fila.addView(opcion, peso(1, dp(31), dp(1)));
             } else if (seleccionadas == 0) {
                 Button inactiva = tecla(etiqueta, TECLA_NORMAL, null);
@@ -1909,17 +3825,17 @@ public class MainActivity extends Activity {
         return resultado;
     }
 
-    private int cantidadDeLetra(char letra) {
+    private int cantidadDeLetra(char letra, String filtro) {
         int cantidad = 0;
-        for (int i=0; i<filtroTeclado.length(); i++) if (filtroTeclado.charAt(i) == letra) cantidad++;
+        for (int i=0; i<filtro.length(); i++) if (filtro.charAt(i) == letra) cantidad++;
         return cantidad;
     }
 
-    private Set<Character> siguientesCaracteres(List<String> disponibles) {
+    private Set<Character> siguientesCaracteres(List<String> disponibles, String filtro) {
         Set<Character> resultado = new HashSet<>();
         for (String archivo : disponibles) {
             String texto = nombre(archivo);
-            if (texto.startsWith(filtroTeclado) && texto.length() > filtroTeclado.length()) resultado.add(texto.charAt(filtroTeclado.length()));
+            if (texto.startsWith(filtro) && texto.length() > filtro.length()) resultado.add(texto.charAt(filtro.length()));
         }
         return resultado;
     }

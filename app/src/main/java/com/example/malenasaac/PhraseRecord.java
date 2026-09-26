@@ -18,7 +18,7 @@ public class PhraseRecord {
     }
 
     public static class Item {
-        public final String archivo;
+        public String archivo;
         public boolean negado;
         /** Palabra sin picto real: se guarda en la frase, no se muestra en la lista de Frases. */
         public final boolean automatico;
