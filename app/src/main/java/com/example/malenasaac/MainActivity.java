@@ -36,6 +36,9 @@ import android.view.animation.DecelerateInterpolator;
 import android.widget.*;
 import java.io.*;
 import java.util.*;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.atomic.AtomicReference;
 
 /** Comunicador visual con composición y reproducción de frases. */
 public class MainActivity extends Activity {
@@ -72,7 +75,12 @@ public class MainActivity extends Activity {
     private static final String DIR = "pictos";
     private static final String PREFS_USOS_JUEGO = "usos_pictos_juego";
     private static final int PERMISO_MICRO_PICTOS = 52;
-    private static final int SEGUNDOS_MAX_ESCUCHA_PICTOS = 15;
+    /** Silencio (o solo palabras sin picto) tras el cual se corta la sesión del reconocedor y se reinicia. */
+    private static final long MS_SILENCIO_PICTOS = 5000L;
+    /** Sin palabras nuevas ni interacción durante este tiempo, el picto ofrecido por voz se rechaza. */
+    private static final long MS_RECHAZO_OFERTA_VOZ = 6000L;
+    /** Con más palabras se cierra la sesión: cada parcial se analiza entero y el costo crece con el largo. */
+    private static final int MAX_PALABRAS_SESION_PICTOS = 15;
     private static final int[] COLORES_PALABRAS = {0xffe3f4e8, 0xffe1f0fa, 0xfffff5c9, 0xffffe3ee};
     private static final int[] COLORES_FRASES = {0xffeee8fb, 0xffffeadb, 0xffdef3f1, 0xffe7edf9};
     /** Estilos visuales de teclas del teclado predictivo. */
@@ -86,7 +94,10 @@ public class MainActivity extends Activity {
     private static final boolean MOSTRAR_PALABRAS_Y_FRASES = false;
     private LinearLayout contenido, lista, juegoPanel;
     private ScrollView scrollLista;
-    private Button tabPalabras, tabFrases, tabJuego;
+    private Button tabPalabras, tabFrases, tabJuego, tabJuegoAudio;
+    private static final String PREFS_JUEGO = "preferencias_juego";
+    /** Modo Audio de Pictos: el micrófono escucha y ofrece pictos solo. En modo Texto no se usa la voz. */
+    private boolean modoAudioJuego;
     private ImageButton tabEditar, salir;
     private LinearLayout tecladoJuegoContenedor;
     private GridLayout mosaicoJuego;
@@ -141,15 +152,51 @@ public class MainActivity extends Activity {
     private boolean eleccionDisyuncionHecha;
     private boolean animandoEleccionJuego;
     private FrameLayout overlayVistaPrevia;
-    private final List<CoincidenciaPicto> colaVozJuego = new ArrayList<>();
-    private int totalColaVozJuego;
     private ImageButton botonMicroJuego;
     private SpeechRecognizer reconocedorPictos;
+    /** Escucha continua en curso (el reconocedor se reinicia solo tras cada sesión). */
     private boolean escuchandoPictos;
-    private String textoParcialPictos;
+    /** Elegido por el usuario con el botón del micrófono: no escuchar ni ofrecer pictos. */
+    private boolean micPictosPausado;
+    private boolean actividadVisible;
     private AnimationDrawable animacionMicroPictos;
-    private final Runnable cortarEscuchaPictosRunnable = this::detenerEscuchaPictos;
-    private final Runnable fallbackEscuchaPictosRunnable = () -> finalizarEscuchaPictos(null);
+    /** Coincidencias de la sesión actual del reconocedor, para no ofrecer dos veces la misma. */
+    private int coincidenciasSesionPictos;
+    private String ultimaCoincidenciaSesionPictos;
+    private int sesionVozPictos;
+    private int sesionContadoresPictos;
+    private boolean sesionPictosCortandose;
+    /** La búsqueda de pictos en el texto es costosa: corre fuera del hilo de la interfaz. */
+    private final ExecutorService hiloVozPictos = Executors.newSingleThreadExecutor();
+    private final AtomicReference<TextoVozPictos> textoVozPendiente = new AtomicReference<>();
+
+    private static final class TextoVozPictos {
+        final String texto;
+        final int sesion;
+        final List<String> catalogo;
+        TextoVozPictos(String texto, int sesion, List<String> catalogo) {
+            this.texto = texto;
+            this.sesion = sesion;
+            this.catalogo = catalogo;
+        }
+    }
+    private int erroresSeguidosPictos;
+    private long ultimoAvisoTarjetaLlena;
+    private boolean ofertaPorVoz;
+    private boolean ofertaInteractuada;
+    private View barraTiempoOferta;
+    private String claveOfertaVoz;
+    private final Runnable silencioPictosRunnable = this::cortarSesionPictos;
+    private final Runnable arrancarSesionPictosRunnable = this::arrancarSesionPictos;
+    private final Runnable reinicioForzadoPictosRunnable = () -> reiniciarSesionPictos(true, 0);
+    /** Algunos motores ignoran startListening sin avisar: si no queda listo a tiempo, se recrea. */
+    private final Runnable arranqueColgadoPictosRunnable = () -> {
+        erroresSeguidosPictos++;
+        reiniciarSesionPictos(true, Math.min(5000L, 300L * erroresSeguidosPictos));
+    };
+    private final Runnable rechazarOfertaVozRunnable = () -> {
+        if (overlayVistaPrevia != null && ofertaPorVoz) cerrarVistaPreviaJuego();
+    };
     /** Archivo de catálogo → archivo real en la carpeta local (pictos propios). */
     private final Map<String, File> pictosLocales = new LinkedHashMap<>();
     private boolean modoEdicion;
@@ -202,8 +249,14 @@ public class MainActivity extends Activity {
         }
         if (MOSTRAR_PALABRAS_Y_FRASES && esInstalacionNueva() && frases.isEmpty()) contenido.post(this::ofrecerRestauracion);
     }
-    @Override protected void onResume() { super.onResume(); ocultarBarras(); }
+    @Override protected void onResume() {
+        super.onResume();
+        ocultarBarras();
+        actividadVisible = true;
+        sincronizarEscuchaPictos();
+    }
     @Override protected void onPause() {
+        actividadVisible = false;
         cancelarCountdownEscucha();
         cancelarFallbackProcesarEscucha();
         restaurarBeepsReconocedor();
@@ -235,6 +288,8 @@ public class MainActivity extends Activity {
         if (reconocedorNombre != null) { reconocedorNombre.destroy(); reconocedorNombre = null; }
         cancelarEscuchaPictos();
         if (reconocedorPictos != null) { reconocedorPictos.destroy(); reconocedorPictos = null; }
+        hiloVozPictos.shutdownNow();
+        handlerEscucha.removeCallbacks(rechazarOfertaVozRunnable);
         if (sonidoJuego != null) { sonidoJuego.release(); sonidoJuego = null; }
         if (sonidoDisyuncion != null) { sonidoDisyuncion.release(); sonidoDisyuncion = null; }
         handlerEscucha.removeCallbacks(entrarModoEdicionRunnable);
@@ -319,9 +374,14 @@ public class MainActivity extends Activity {
         LinearLayout tabs = new LinearLayout(this); tabs.setPadding(dp(10),dp(10),dp(10),dp(6));
         tabPalabras = tab("Palabras", v -> { if (!escuchandoVoz) mostrarPalabras(); });
         tabFrases = tab("Frases", v -> { if (!escuchandoVoz) mostrarFrases(); });
-        tabJuego = tab("Pictos", v -> { if (!escuchandoVoz) mostrarJuego(); });
+        modoAudioJuego = getSharedPreferences(PREFS_JUEGO, MODE_PRIVATE).getBoolean("modo_audio", false);
+        tabJuego = tab("Pictos · Texto", v -> elegirModoJuego(false));
+        tabJuego.setContentDescription("Pictos en modo texto");
+        tabJuegoAudio = tab("Pictos · Audio", v -> elegirModoJuego(true));
+        tabJuegoAudio.setContentDescription("Pictos en modo audio, con reconocimiento de voz");
         tabs.addView(tabPalabras, peso(1,-2,dp(2))); tabs.addView(tabFrases, peso(1,-2,dp(2)));
         tabs.addView(tabJuego, peso(1,-2,dp(2)));
+        tabs.addView(tabJuegoAudio, peso(1,-2,dp(2)));
         if (!MOSTRAR_PALABRAS_Y_FRASES) {
             tabPalabras.setVisibility(View.GONE);
             tabFrases.setVisibility(View.GONE);
@@ -369,7 +429,7 @@ public class MainActivity extends Activity {
         botonMicroJuego.setScaleType(ImageView.ScaleType.FIT_CENTER);
         botonMicroJuego.setPadding(dp(4), dp(4), dp(4), dp(4));
         botonMicroJuego.setOnClickListener(v -> alternarMicroPictos());
-        actualizarIconoMicroPictos(false);
+        actualizarIconoMicroPictos();
         LinearLayout.LayoutParams microParams = new LinearLayout.LayoutParams(tamBoton, tamBoton);
         microParams.rightMargin = dp(4);
         controlesJuego.addView(botonMicroJuego, microParams);
@@ -429,6 +489,7 @@ public class MainActivity extends Activity {
 
     private void mostrarPalabras() {
         solapaActual = SOLAPA_PALABRAS; actualizarTabs();
+        sincronizarEscuchaPictos();
         scrollLista.setVisibility(View.VISIBLE); juegoPanel.setVisibility(View.GONE);
         lista.removeAllViews();
         int indice=0;
@@ -862,10 +923,12 @@ public class MainActivity extends Activity {
             tabPalabras.setEnabled(false);
             tabFrases.setEnabled(false);
             tabJuego.setEnabled(false);
+            tabJuegoAudio.setEnabled(false);
             tabEditar.setEnabled(false);
             tabPalabras.setAlpha(0.35f);
             tabFrases.setAlpha(0.35f);
             tabJuego.setAlpha(0.35f);
+            tabJuegoAudio.setAlpha(0.35f);
             tabEditar.setAlpha(0.35f);
             salir.setEnabled(false);
             salir.setAlpha(0.35f);
@@ -968,6 +1031,7 @@ public class MainActivity extends Activity {
     private void mostrarFrases() {
         if (escuchandoVoz) return;
         solapaActual = SOLAPA_FRASES; actualizarTabs();
+        sincronizarEscuchaPictos();
         scrollLista.setVisibility(View.VISIBLE); juegoPanel.setVisibility(View.GONE);
         lista.removeAllViews();
         limpiarSeleccionInvalida();
@@ -1074,16 +1138,36 @@ public class MainActivity extends Activity {
         scrollLista.setVisibility(View.GONE); juegoPanel.setVisibility(View.VISIBLE);
         while (seleccionJuego.size() > MAX_PICTOS_JUEGO) seleccionJuego.remove(seleccionJuego.size() - 1);
         construirVistaJuego();
+        sincronizarEscuchaPictos();
+    }
+
+    /** Cambia entre Pictos Texto y Pictos Audio conservando la tarjeta, el filtro y el mosaico. */
+    private void elegirModoJuego(boolean audio) {
+        if (escuchandoVoz) return;
+        boolean cambio = modoAudioJuego != audio;
+        if (cambio) {
+            modoAudioJuego = audio;
+            getSharedPreferences(PREFS_JUEGO, MODE_PRIVATE).edit().putBoolean("modo_audio", audio).apply();
+        }
+        if (solapaActual != SOLAPA_JUEGO) { mostrarJuego(); return; }
+        if (!cambio) return;
+        if (!audio && ofertaPorVoz) quitarVistaPreviaJuegoAlInstante();
+        actualizarTabs();
+        sincronizarEscuchaPictos();
     }
 
     private void actualizarTabs() {
         boolean enPalabras = solapaActual == SOLAPA_PALABRAS;
         boolean enFrases = solapaActual == SOLAPA_FRASES;
         boolean enJuego = solapaActual == SOLAPA_JUEGO;
-        tabPalabras.setEnabled(!enPalabras); tabFrases.setEnabled(!enFrases); tabJuego.setEnabled(!enJuego);
-        tabPalabras.setAlpha(enPalabras ? 1 : .72f); tabFrases.setAlpha(enFrases ? 1 : .72f); tabJuego.setAlpha(enJuego ? 1 : .72f);
+        boolean enTexto = enJuego && !modoAudioJuego;
+        boolean enAudio = enJuego && modoAudioJuego;
+        tabPalabras.setEnabled(!enPalabras); tabFrases.setEnabled(!enFrases);
+        tabJuego.setEnabled(!enTexto); tabJuegoAudio.setEnabled(!enAudio);
+        tabPalabras.setAlpha(enPalabras ? 1 : .72f); tabFrases.setAlpha(enFrases ? 1 : .72f);
+        tabJuego.setAlpha(enTexto ? 1 : .72f); tabJuegoAudio.setAlpha(enAudio ? 1 : .72f);
         tabPalabras.setBackground(fondoSolapa(enPalabras)); tabFrases.setBackground(fondoSolapa(enFrases));
-        tabJuego.setBackground(fondoSolapa(enJuego));
+        tabJuego.setBackground(fondoSolapa(enTexto)); tabJuegoAudio.setBackground(fondoSolapa(enAudio));
         tabEditar.setEnabled(true);
         tabEditar.setAlpha(.72f);
         tabEditar.setBackground(fondoSolapa(false));
@@ -1282,8 +1366,8 @@ public class MainActivity extends Activity {
     private void entrarModoEdicion() {
         if (escuchandoVoz || modoEdicion) return;
         modoEdicion = true;
-        cancelarEscuchaPictos();
-        colaVozJuego.clear();
+        sincronizarEscuchaPictos();
+        if (ofertaPorVoz) quitarVistaPreviaJuegoAlInstante();
         tabEditar.performHapticFeedback(HapticFeedbackConstants.LONG_PRESS);
         PictosLocales.carpeta(this);
         AudiosPictos.carpeta(this);
@@ -2413,12 +2497,7 @@ public class MainActivity extends Activity {
     }
 
     @Override public void onBackPressed() {
-        if (escuchandoPictos) {
-            cancelarEscuchaPictos();
-            return;
-        }
         if (overlayVistaPrevia != null) {
-            colaVozJuego.clear();
             cerrarVistaPreviaJuego();
             return;
         }
@@ -2628,20 +2707,20 @@ public class MainActivity extends Activity {
     }
 
     private void mostrarVistaPreviaJuego(String archivo, View origen) {
-        abrirVistaPreviaJuego(Collections.singletonList(archivo), 0, false, origen, null);
+        abrirVistaPreviaJuego(Collections.singletonList(archivo), 0, false, origen, false);
     }
 
     /**
      * Amplía el picto al 50% del ancho para confirmarlo (OK) o descartarlo (NO) antes de enviarlo a la tarjeta.
      * Con más de una opción (variantes del mismo nombre) muestra − / + para cambiar de imagen.
      * Sin origen, el picto aparece creciendo desde el centro.
+     * Si viene de la voz, se rechaza solo tras {@link #MS_RECHAZO_OFERTA_VOZ} sin palabras nuevas ni interacción.
      */
     private void abrirVistaPreviaJuego(List<String> opciones, int indiceInicial, boolean negado,
-                                       View origen, String progreso) {
+                                       View origen, boolean porVoz) {
         if (animandoEleccionJuego || overlayVistaPrevia != null || opciones.isEmpty()) return;
         if (seleccionJuego.size() >= MAX_PICTOS_JUEGO) {
             Toast.makeText(this, "Podés seleccionar hasta " + MAX_PICTOS_JUEGO + " pictogramas.", Toast.LENGTH_SHORT).show();
-            colaVozJuego.clear();
             return;
         }
         FrameLayout raiz = (FrameLayout) contenido.getParent();
@@ -2658,17 +2737,6 @@ public class MainActivity extends Activity {
         caja.setOrientation(LinearLayout.VERTICAL);
         caja.setGravity(Gravity.CENTER_HORIZONTAL);
         caja.setClickable(true);
-
-        if (progreso != null) {
-            TextView textoProgreso = new TextView(this);
-            textoProgreso.setText(progreso);
-            textoProgreso.setTextColor(Color.WHITE);
-            textoProgreso.setTextSize(TypedValue.COMPLEX_UNIT_SP, 18);
-            textoProgreso.setTypeface(Typeface.DEFAULT_BOLD);
-            LinearLayout.LayoutParams pp = new LinearLayout.LayoutParams(-2, -2);
-            pp.bottomMargin = dp(10);
-            caja.addView(textoProgreso, pp);
-        }
 
         LinearLayout filaImagen = new LinearLayout(this);
         filaImagen.setOrientation(LinearLayout.HORIZONTAL);
@@ -2699,6 +2767,7 @@ public class MainActivity extends Activity {
             Button menos = botonVariante("\u2212");
             menos.setContentDescription("Imagen anterior");
             menos.setOnClickListener(v -> {
+                marcarInteraccionOferta();
                 indice[0] = (indice[0] - 1 + opciones.size()) % opciones.size();
                 mostrarOpcion.run();
             });
@@ -2709,6 +2778,7 @@ public class MainActivity extends Activity {
             Button mas = botonVariante("+");
             mas.setContentDescription("Imagen siguiente");
             mas.setOnClickListener(v -> {
+                marcarInteraccionOferta();
                 indice[0] = (indice[0] + 1) % opciones.size();
                 mostrarOpcion.run();
             });
@@ -2730,6 +2800,7 @@ public class MainActivity extends Activity {
         ok.setOnClickListener(v -> {
             if (overlayVistaPrevia != overlay) return;
             overlayVistaPrevia = null;
+            detenerTemporizadorOferta();
             animarEleccionJuego(opciones.get(indice[0]), negado, marco);
             raiz.removeView(overlay);
         });
@@ -2743,9 +2814,27 @@ public class MainActivity extends Activity {
         botonesParams.topMargin = dp(16);
         caja.addView(botones, botonesParams);
 
+        if (porVoz) {
+            View barra = new View(this);
+            GradientDrawable fondoBarra = new GradientDrawable();
+            fondoBarra.setColor(Color.WHITE);
+            fondoBarra.setCornerRadius(dp(3));
+            barra.setBackground(fondoBarra);
+            barra.setPivotX(0);
+            LinearLayout.LayoutParams bp = new LinearLayout.LayoutParams(lado, dp(6));
+            bp.topMargin = dp(12);
+            caja.addView(barra, bp);
+            barraTiempoOferta = barra;
+        } else {
+            barraTiempoOferta = null;
+        }
+
         overlay.addView(caja, new FrameLayout.LayoutParams(-2, -2, Gravity.CENTER));
         overlayVistaPrevia = overlay;
+        ofertaPorVoz = porVoz;
+        ofertaInteractuada = false;
         raiz.addView(overlay, new FrameLayout.LayoutParams(-1, -1));
+        if (porVoz) reiniciarTemporizadorOferta();
 
         overlay.setAlpha(0f);
         overlay.animate().alpha(1f).setDuration(180).start();
@@ -2772,11 +2861,51 @@ public class MainActivity extends Activity {
         FrameLayout overlay = overlayVistaPrevia;
         if (overlay == null) return;
         overlayVistaPrevia = null;
+        detenerTemporizadorOferta();
         overlay.animate().alpha(0f).setDuration(150).withEndAction(() -> {
             ViewParent padre = overlay.getParent();
             if (padre instanceof ViewGroup) ((ViewGroup) padre).removeView(overlay);
-            continuarColaVozJuego();
         }).start();
+    }
+
+    /** Descarta la vista previa sin animación, para dejar lugar enseguida a otro picto. */
+    private void quitarVistaPreviaJuegoAlInstante() {
+        FrameLayout overlay = overlayVistaPrevia;
+        if (overlay == null) return;
+        overlayVistaPrevia = null;
+        detenerTemporizadorOferta();
+        overlay.animate().cancel();
+        ViewParent padre = overlay.getParent();
+        if (padre instanceof ViewGroup) ((ViewGroup) padre).removeView(overlay);
+    }
+
+    private void reiniciarTemporizadorOferta() {
+        handlerEscucha.removeCallbacks(rechazarOfertaVozRunnable);
+        if (overlayVistaPrevia == null || !ofertaPorVoz) return;
+        handlerEscucha.postDelayed(rechazarOfertaVozRunnable, MS_RECHAZO_OFERTA_VOZ);
+        View barra = barraTiempoOferta;
+        if (barra != null) {
+            barra.animate().cancel();
+            barra.setScaleX(1f);
+            barra.animate().scaleX(0f).setDuration(MS_RECHAZO_OFERTA_VOZ)
+                    .setInterpolator(new android.view.animation.LinearInterpolator()).start();
+        }
+    }
+
+    private void detenerTemporizadorOferta() {
+        handlerEscucha.removeCallbacks(rechazarOfertaVozRunnable);
+        if (barraTiempoOferta != null) barraTiempoOferta.animate().cancel();
+        barraTiempoOferta = null;
+        ofertaPorVoz = false;
+        ofertaInteractuada = false;
+        claveOfertaVoz = null;
+    }
+
+    /** El usuario está operando sobre el picto: la voz ya no lo reemplaza y se renueva la espera. */
+    private void marcarInteraccionOferta() {
+        if (!ofertaPorVoz) return;
+        ofertaInteractuada = true;
+        reiniciarTemporizadorOferta();
     }
 
     private Button botonVariante(String texto) {
@@ -2794,24 +2923,6 @@ public class MainActivity extends Activity {
         f.setStroke(dp(2), 0xff718596);
         b.setBackground(f);
         return b;
-    }
-
-    /** Muestra el siguiente picto reconocido por voz, si quedan y no hay otra vista abierta. */
-    private void continuarColaVozJuego() {
-        if (colaVozJuego.isEmpty() || overlayVistaPrevia != null || animandoEleccionJuego) return;
-        if (solapaActual != SOLAPA_JUEGO || modoEdicion) { colaVozJuego.clear(); return; }
-        if (seleccionJuego.size() >= MAX_PICTOS_JUEGO) {
-            Toast.makeText(this, "La tarjeta está completa (" + MAX_PICTOS_JUEGO + " pictogramas).", Toast.LENGTH_SHORT).show();
-            colaVozJuego.clear();
-            return;
-        }
-        CoincidenciaPicto siguiente = colaVozJuego.remove(0);
-        int numero = totalColaVozJuego - colaVozJuego.size();
-        String progreso = totalColaVozJuego > 1 ? numero + " de " + totalColaVozJuego : null;
-        List<String> opciones = variantesDe(siguiente.archivo);
-        if (opciones.isEmpty()) opciones = Collections.singletonList(siguiente.archivo);
-        int indice = Math.max(0, opciones.indexOf(varianteMasUsada(siguiente.archivo)));
-        abrirVistaPreviaJuego(opciones, indice, siguiente.negado, null, progreso);
     }
 
     private Button botonVistaPrevia(String texto, int color) {
@@ -2834,12 +2945,11 @@ public class MainActivity extends Activity {
         if (animandoEleccionJuego) return;
         if (seleccionJuego.size() >= MAX_PICTOS_JUEGO) {
             Toast.makeText(this, "Podés seleccionar hasta " + MAX_PICTOS_JUEGO + " pictogramas.", Toast.LENGTH_SHORT).show();
-            colaVozJuego.clear();
             return;
         }
         int indiceDestino = seleccionJuego.size();
         View destino = slotsEleccionJuego.getChildAt(indiceDestino);
-        if (destino == null) { colaVozJuego.clear(); return; }
+        if (destino == null) return;
         animandoEleccionJuego = true;
         int scrollNecesario = destino.getRight() - scrollSlotsJuego.getWidth();
         if (scrollNecesario > scrollSlotsJuego.getScrollX()) scrollSlotsJuego.scrollTo(scrollNecesario, 0);
@@ -2874,13 +2984,17 @@ public class MainActivity extends Activity {
                     registrarUsoJuego(archivo);
                     actualizarTabEleccionJuego();
                     animandoEleccionJuego = false;
-                    tabEleccionJuego.post(this::continuarColaVozJuego);
                 }).start();
     }
 
+    /** Pausa o reanuda la escucha continua de pictos. */
     private void alternarMicroPictos() {
-        if (escuchandoPictos) { detenerEscuchaPictos(); return; }
-        if (overlayVistaPrevia != null || animandoEleccionJuego || escuchandoVoz) return;
+        if (escuchandoPictos) {
+            micPictosPausado = true;
+            sincronizarEscuchaPictos();
+            return;
+        }
+        if (escuchandoVoz) return;
         if (!SpeechRecognizer.isRecognitionAvailable(this)) {
             Toast.makeText(this, "Reconocimiento de voz no disponible.", Toast.LENGTH_SHORT).show();
             return;
@@ -2889,126 +3003,260 @@ public class MainActivity extends Activity {
             requestPermissions(new String[]{android.Manifest.permission.RECORD_AUDIO}, PERMISO_MICRO_PICTOS);
             return;
         }
-        iniciarEscuchaPictos();
+        micPictosPausado = false;
+        sincronizarEscuchaPictos();
+    }
+
+    private boolean debeEscucharPictos() {
+        return modoAudioJuego && !micPictosPausado && actividadVisible && solapaActual == SOLAPA_JUEGO && !modoEdicion
+                && !escuchandoVoz
+                && checkSelfPermission(android.Manifest.permission.RECORD_AUDIO) == PackageManager.PERMISSION_GRANTED
+                && SpeechRecognizer.isRecognitionAvailable(this);
+    }
+
+    /** Enciende o apaga la escucha continua según la solapa, el modo edición, la pausa y el permiso. */
+    private void sincronizarEscuchaPictos() {
+        if (debeEscucharPictos()) {
+            if (!escuchandoPictos) iniciarEscuchaPictos();
+        } else {
+            cancelarEscuchaPictos();
+        }
+        actualizarIconoMicroPictos();
     }
 
     private void iniciarEscuchaPictos() {
-        if (reconocedorPictos == null) {
-            reconocedorPictos = SpeechRecognizer.createSpeechRecognizer(this);
-            reconocedorPictos.setRecognitionListener(new RecognitionListener() {
-                @Override public void onReadyForSpeech(Bundle params) { }
-                @Override public void onBeginningOfSpeech() { }
-                @Override public void onRmsChanged(float rmsdB) {
-                    runOnUiThread(() -> {
-                        if (!escuchandoPictos || botonMicroJuego == null) return;
-                        float escala = 1f + Math.max(0f, rmsdB) / 12f * 0.18f;
-                        botonMicroJuego.setScaleX(escala);
-                        botonMicroJuego.setScaleY(escala);
-                    });
-                }
-                @Override public void onBufferReceived(byte[] buffer) { }
-                @Override public void onEndOfSpeech() { }
-                @Override public void onPartialResults(Bundle partialResults) {
-                    String parcial = primerResultado(partialResults);
-                    if (parcial != null && !parcial.trim().isEmpty()) textoParcialPictos = parcial;
-                }
-                @Override public void onEvent(int eventType, Bundle params) { }
-                @Override public void onError(int error) {
-                    runOnUiThread(() -> finalizarEscuchaPictos(null));
-                }
-                @Override public void onResults(Bundle results) {
-                    String texto = primerResultado(results);
-                    runOnUiThread(() -> finalizarEscuchaPictos(texto));
-                }
-            });
-        }
-        colaVozJuego.clear();
-        textoParcialPictos = null;
         escuchandoPictos = true;
+        erroresSeguidosPictos = 0;
         silenciarBeepsReconocedor();
-        actualizarIconoMicroPictos(true);
-        handlerEscucha.postDelayed(cortarEscuchaPictosRunnable, SEGUNDOS_MAX_ESCUCHA_PICTOS * 1000L);
+        reiniciarSesionPictos(false, 0);
+    }
+
+    private SpeechRecognizer crearReconocedorPictos() {
+        SpeechRecognizer r = SpeechRecognizer.createSpeechRecognizer(this);
+        r.setRecognitionListener(new RecognitionListener() {
+            private boolean vigente() { return escuchandoPictos && reconocedorPictos == r; }
+            @Override public void onReadyForSpeech(Bundle params) {
+                runOnUiThread(() -> { if (vigente()) handlerEscucha.removeCallbacks(arranqueColgadoPictosRunnable); });
+            }
+            @Override public void onBeginningOfSpeech() {
+                runOnUiThread(() -> { if (vigente()) handlerEscucha.removeCallbacks(arranqueColgadoPictosRunnable); });
+            }
+            @Override public void onRmsChanged(float rmsdB) {
+                runOnUiThread(() -> {
+                    if (!vigente() || botonMicroJuego == null) return;
+                    handlerEscucha.removeCallbacks(arranqueColgadoPictosRunnable);
+                    float escala = 1f + Math.max(0f, rmsdB) / 12f * 0.18f;
+                    botonMicroJuego.setScaleX(escala);
+                    botonMicroJuego.setScaleY(escala);
+                });
+            }
+            @Override public void onBufferReceived(byte[] buffer) { }
+            @Override public void onEndOfSpeech() { }
+            @Override public void onPartialResults(Bundle partialResults) {
+                String parcial = primerResultado(partialResults);
+                runOnUiThread(() -> { if (vigente()) procesarVozPictos(parcial); });
+            }
+            @Override public void onEvent(int eventType, Bundle params) { }
+            @Override public void onError(int error) {
+                runOnUiThread(() -> { if (vigente()) errorSesionPictos(error); });
+            }
+            @Override public void onResults(Bundle results) {
+                String texto = primerResultado(results);
+                runOnUiThread(() -> {
+                    if (!vigente()) return;
+                    procesarVozPictos(texto);
+                    erroresSeguidosPictos = 0;
+                    reiniciarSesionPictos(false, 150);
+                });
+            }
+        });
+        return r;
+    }
+
+    private Intent intentEscuchaPictos() {
+        Intent intent = intentEscuchaNombre();
+        intent.putExtra(RecognizerIntent.EXTRA_SPEECH_INPUT_COMPLETE_SILENCE_LENGTH_MILLIS, MS_SILENCIO_PICTOS);
+        intent.putExtra(RecognizerIntent.EXTRA_SPEECH_INPUT_POSSIBLY_COMPLETE_SILENCE_LENGTH_MILLIS, MS_SILENCIO_PICTOS);
+        return intent;
+    }
+
+    /** Programa una nueva sesión del reconocedor; con {@code recrear} descarta el anterior (tras errores del motor). */
+    private void reiniciarSesionPictos(boolean recrear, long demora) {
+        handlerEscucha.removeCallbacks(silencioPictosRunnable);
+        handlerEscucha.removeCallbacks(reinicioForzadoPictosRunnable);
+        handlerEscucha.removeCallbacks(arrancarSesionPictosRunnable);
+        handlerEscucha.removeCallbacks(arranqueColgadoPictosRunnable);
+        if (!escuchandoPictos) return;
+        if (recrear && reconocedorPictos != null) {
+            try { reconocedorPictos.destroy(); } catch (RuntimeException ignored) { }
+            reconocedorPictos = null;
+        }
+        if (demora > 0) handlerEscucha.postDelayed(arrancarSesionPictosRunnable, demora);
+        else arrancarSesionPictos();
+    }
+
+    private void arrancarSesionPictos() {
+        if (!escuchandoPictos) return;
+        if (reconocedorPictos == null) reconocedorPictos = crearReconocedorPictos();
+        sesionVozPictos++;
+        sesionPictosCortandose = false;
+        handlerEscucha.postDelayed(silencioPictosRunnable, MS_SILENCIO_PICTOS);
+        handlerEscucha.postDelayed(arranqueColgadoPictosRunnable, 2500);
         try {
-            reconocedorPictos.startListening(intentEscuchaNombre());
+            reconocedorPictos.startListening(intentEscuchaPictos());
         } catch (RuntimeException e) {
-            finalizarEscuchaPictos(null);
+            errorSesionPictos(SpeechRecognizer.ERROR_CLIENT);
         }
     }
 
-    /** Corta la escucha; el resultado llega por onResults o, si el motor no responde, por el fallback. */
-    private void detenerEscuchaPictos() {
-        if (!escuchandoPictos) return;
-        handlerEscucha.removeCallbacks(cortarEscuchaPictosRunnable);
+    /** Silencio o solo palabras sin picto: se cierra la sesión (llega onResults) y se abre otra. */
+    private void cortarSesionPictos() {
+        if (!escuchandoPictos || reconocedorPictos == null || sesionPictosCortandose) return;
+        sesionPictosCortandose = true;
+        handlerEscucha.removeCallbacks(silencioPictosRunnable);
         try { reconocedorPictos.stopListening(); } catch (RuntimeException ignored) { }
-        handlerEscucha.removeCallbacks(fallbackEscuchaPictosRunnable);
-        handlerEscucha.postDelayed(fallbackEscuchaPictosRunnable, 1500);
+        handlerEscucha.postDelayed(reinicioForzadoPictosRunnable, 1500);
+    }
+
+    private void errorSesionPictos(int error) {
+        if (!escuchandoPictos) return;
+        if (error == SpeechRecognizer.ERROR_INSUFFICIENT_PERMISSIONS) {
+            micPictosPausado = true;
+            sincronizarEscuchaPictos();
+            return;
+        }
+        if (error == SpeechRecognizer.ERROR_NO_MATCH || error == SpeechRecognizer.ERROR_SPEECH_TIMEOUT) {
+            erroresSeguidosPictos = 0;
+            reiniciarSesionPictos(false, 150);
+            return;
+        }
+        erroresSeguidosPictos++;
+        reiniciarSesionPictos(true, Math.min(5000L, 300L * erroresSeguidosPictos));
     }
 
     private void cancelarEscuchaPictos() {
+        handlerEscucha.removeCallbacks(silencioPictosRunnable);
+        handlerEscucha.removeCallbacks(reinicioForzadoPictosRunnable);
+        handlerEscucha.removeCallbacks(arrancarSesionPictosRunnable);
+        handlerEscucha.removeCallbacks(arranqueColgadoPictosRunnable);
+        textoVozPendiente.set(null);
         if (!escuchandoPictos) return;
         escuchandoPictos = false;
-        handlerEscucha.removeCallbacks(cortarEscuchaPictosRunnable);
-        handlerEscucha.removeCallbacks(fallbackEscuchaPictosRunnable);
-        try { reconocedorPictos.cancel(); } catch (RuntimeException ignored) { }
+        if (reconocedorPictos != null) {
+            try { reconocedorPictos.cancel(); } catch (RuntimeException ignored) { }
+        }
         restaurarBeepsReconocedor();
-        actualizarIconoMicroPictos(false);
-        textoParcialPictos = null;
+        actualizarIconoMicroPictos();
     }
 
-    private void finalizarEscuchaPictos(String texto) {
-        if (!escuchandoPictos) return;
-        escuchandoPictos = false;
-        handlerEscucha.removeCallbacks(cortarEscuchaPictosRunnable);
-        handlerEscucha.removeCallbacks(fallbackEscuchaPictosRunnable);
-        restaurarBeepsReconocedor();
-        actualizarIconoMicroPictos(false);
-        if (texto == null || texto.trim().isEmpty()) texto = textoParcialPictos;
-        textoParcialPictos = null;
-        if (texto == null || texto.trim().isEmpty()) {
-            Toast.makeText(this, "No se escuchó nada.", Toast.LENGTH_SHORT).show();
-            return;
-        }
-        colaVozJuego.clear();
-        for (CoincidenciaPicto c : AlgoritmoPictosFrase.coincidencias(texto, catalogoBuscable, this::nombre)) {
-            if (!c.automatico && c.archivo != null && !c.archivo.isEmpty()) colaVozJuego.add(c);
-        }
-        if (colaVozJuego.isEmpty()) {
-            Toast.makeText(this, "No encontré pictos para: \"" + texto.trim() + "\"", Toast.LENGTH_LONG).show();
-            return;
-        }
-        int libres = MAX_PICTOS_JUEGO - seleccionJuego.size();
-        if (libres <= 0) {
-            Toast.makeText(this, "La tarjeta está completa (" + MAX_PICTOS_JUEGO + " pictogramas).", Toast.LENGTH_SHORT).show();
-            colaVozJuego.clear();
-            return;
-        }
-        while (colaVozJuego.size() > libres) colaVozJuego.remove(colaVozJuego.size() - 1);
-        totalColaVozJuego = colaVozJuego.size();
-        continuarColaVozJuego();
+    /**
+     * Texto parcial o final de la sesión actual: si apareció una coincidencia nueva, se ofrece la última.
+     * Una revisión que cambia la última (p. ej. "auto" → "auto de mamá") también cuenta como nueva.
+     */
+    private void procesarVozPictos(String texto) {
+        if (texto == null || texto.trim().isEmpty()) return;
+        if (!sesionPictosCortandose && texto.trim().split("\\s+").length > MAX_PALABRAS_SESION_PICTOS)
+            cortarSesionPictos();
+        TextoVozPictos pedido = new TextoVozPictos(texto, sesionVozPictos, new ArrayList<>(catalogoBuscable));
+        // Si ya hay una búsqueda en cola, solo se actualiza el texto: se analiza siempre el más reciente.
+        if (textoVozPendiente.getAndSet(pedido) != null) return;
+        hiloVozPictos.execute(() -> {
+            TextoVozPictos actual = textoVozPendiente.getAndSet(null);
+            if (actual == null) return;
+            List<CoincidenciaPicto> encontradas = new ArrayList<>();
+            for (CoincidenciaPicto c : AlgoritmoPictosFrase.coincidencias(actual.texto, actual.catalogo, this::nombre))
+                if (!c.automatico && c.archivo != null && !c.archivo.isEmpty()) encontradas.add(c);
+            if (encontradas.isEmpty()) return;
+            runOnUiThread(() -> aplicarVozPictos(encontradas, actual.sesion));
+        });
     }
 
-    private void actualizarIconoMicroPictos(boolean escuchando) {
+    /** Resultado de la búsqueda en segundo plano; descarta los de sesiones ya superadas. */
+    private void aplicarVozPictos(List<CoincidenciaPicto> encontradas, int sesion) {
+        if (!escuchandoPictos || sesion < sesionContadoresPictos) return;
+        if (sesion > sesionContadoresPictos) {
+            sesionContadoresPictos = sesion;
+            coincidenciasSesionPictos = 0;
+            ultimaCoincidenciaSesionPictos = null;
+        }
+        CoincidenciaPicto ultima = encontradas.get(encontradas.size() - 1);
+        String clave = ultima.archivo + (ultima.negado ? "|no" : "");
+        int cantidad = encontradas.size();
+        boolean nueva = cantidad > coincidenciasSesionPictos
+                || (cantidad == coincidenciasSesionPictos && !clave.equals(ultimaCoincidenciaSesionPictos));
+        if (!nueva) return;
+        coincidenciasSesionPictos = cantidad;
+        ultimaCoincidenciaSesionPictos = clave;
+        if (sesion == sesionVozPictos && !sesionPictosCortandose) {
+            handlerEscucha.removeCallbacks(silencioPictosRunnable);
+            handlerEscucha.postDelayed(silencioPictosRunnable, MS_SILENCIO_PICTOS);
+        }
+        ofrecerPictoVoz(ultima, clave);
+    }
+
+    private boolean puedeOfrecerPictoVoz() {
+        return solapaActual == SOLAPA_JUEGO && !modoEdicion && !animandoEleccionJuego
+                && overlayDisyuncion == null && contenido.getVisibility() == View.VISIBLE;
+    }
+
+    /**
+     * Reemplaza la oferta de voz pendiente salvo que el usuario esté operando sobre ella (−/+)
+     * o la haya abierto a mano; en ese caso solo renueva la espera.
+     */
+    private void ofrecerPictoVoz(CoincidenciaPicto c, String clave) {
+        if (!puedeOfrecerPictoVoz()) return;
+        if (overlayVistaPrevia != null) {
+            if (!ofertaPorVoz) return;
+            if (ofertaInteractuada || clave.equals(claveOfertaVoz)) {
+                reiniciarTemporizadorOferta();
+                return;
+            }
+            quitarVistaPreviaJuegoAlInstante();
+        }
+        if (seleccionJuego.size() >= MAX_PICTOS_JUEGO) {
+            long ahora = System.currentTimeMillis();
+            if (ahora - ultimoAvisoTarjetaLlena > 4000) {
+                ultimoAvisoTarjetaLlena = ahora;
+                Toast.makeText(this, "La tarjeta está completa (" + MAX_PICTOS_JUEGO + " pictogramas).", Toast.LENGTH_SHORT).show();
+            }
+            return;
+        }
+        List<String> opciones = variantesDe(c.archivo);
+        if (opciones.isEmpty()) opciones = Collections.singletonList(c.archivo);
+        int indice = Math.max(0, opciones.indexOf(varianteMasUsada(c.archivo)));
+        abrirVistaPreviaJuego(opciones, indice, c.negado, null, true);
+        if (ofertaPorVoz) claveOfertaVoz = clave;
+    }
+
+    private void actualizarIconoMicroPictos() {
         if (botonMicroJuego == null) return;
+        botonMicroJuego.setVisibility(modoAudioJuego ? View.VISIBLE : View.GONE);
         if (animacionMicroPictos != null) {
             animacionMicroPictos.stop();
             animacionMicroPictos = null;
         }
         botonMicroJuego.setScaleX(1f);
         botonMicroJuego.setScaleY(1f);
-        if (escuchando) {
+        if (escuchandoPictos) {
             Drawable anim = getResources().getDrawable(R.drawable.anim_escucha, getTheme());
             botonMicroJuego.setImageDrawable(anim);
             if (anim instanceof AnimationDrawable) {
                 animacionMicroPictos = (AnimationDrawable) anim;
                 animacionMicroPictos.start();
             }
+            botonMicroJuego.setContentDescription("Pausar la escucha de pictos");
+        } else if (micPictosPausado) {
+            Drawable icono = getResources().getDrawable(android.R.drawable.ic_media_pause, getTheme()).mutate();
+            icono.setTint(0xffc62828);
+            botonMicroJuego.setImageDrawable(icono);
+            botonMicroJuego.setContentDescription("Escucha en pausa: tocá para reanudar");
         } else {
             Drawable icono = getResources().getDrawable(android.R.drawable.ic_btn_speak_now, getTheme()).mutate();
             icono.setTint(0xff263238);
             botonMicroJuego.setImageDrawable(icono);
+            botonMicroJuego.setContentDescription("Escuchar pictos con la voz");
         }
-        botonMicroJuego.setBackground(fondoTecla(escuchando ? TECLA_PULSADA : TECLA_NORMAL));
-        botonMicroJuego.setContentDescription(escuchando ? "Terminar de escuchar" : "Decir pictos con la voz");
+        botonMicroJuego.setBackground(fondoTecla(escuchandoPictos ? TECLA_PULSADA : TECLA_NORMAL));
     }
 
     private void sonidoEleccionJuego() {
@@ -3965,8 +4213,9 @@ public class MainActivity extends Activity {
             else Toast.makeText(this, "Se necesita permiso de almacenamiento.", Toast.LENGTH_SHORT).show();
         }
         if (codigo == PERMISO_MICRO_PICTOS) {
-            if (resultados[0] == PackageManager.PERMISSION_GRANTED) iniciarEscuchaPictos();
-            else Toast.makeText(this, "Se necesita permiso de micrófono.", Toast.LENGTH_SHORT).show();
+            micPictosPausado = resultados[0] != PackageManager.PERMISSION_GRANTED;
+            if (micPictosPausado) Toast.makeText(this, "Se necesita permiso de micrófono.", Toast.LENGTH_SHORT).show();
+            sincronizarEscuchaPictos();
         }
         if (codigo == PERMISO_EXPORT_PICTOS) {
             if (resultados[0] == PackageManager.PERMISSION_GRANTED) exportarPictosPublicos();

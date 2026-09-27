@@ -4,6 +4,9 @@ import java.text.Normalizer;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Locale;
+import java.util.Map;
+import java.util.concurrent.ConcurrentHashMap;
+import java.util.regex.Pattern;
 
 /** Cruza nombres de pictogramas con texto reconocido por voz. */
 public final class AlgoritmoPictosFrase {
@@ -120,6 +123,7 @@ public final class AlgoritmoPictosFrase {
                         && !ReglasPictosFrase.segmentoPermitePictoRestringido(segmento, archivo)) {
                     continue;
                 }
+                if (!puedeAlcanzarMinimo(segmento, nombrePicto)) continue;
                 float similitud = similitud(segmento, nombrePicto);
                 if (similitud >= SIMILITUD_MINIMA && (similitud > mejorSimilitud
                         || (similitud == mejorSimilitud && largo > mejorLargo))) {
@@ -147,6 +151,7 @@ public final class AlgoritmoPictosFrase {
                     && !ReglasPictosFrase.segmentoPermitePictoRestringido(segmentoNorm, archivo)) {
                 continue;
             }
+            if (!puedeAlcanzarMinimo(segmentoNorm, nombrePicto)) continue;
             float similitud = similitud(segmentoNorm, nombrePicto);
             if (similitud >= SIMILITUD_MINIMA && similitud > mejorSimilitud) {
                 mejorSimilitud = similitud;
@@ -156,11 +161,29 @@ public final class AlgoritmoPictosFrase {
         return mejorArchivo;
     }
 
+    /** Se llama miles de veces por búsqueda (una por picto y segmento); sin caché congela la escucha continua. */
+    private static final Map<String, String> CACHE_NORMALIZADO = new ConcurrentHashMap<>();
+    private static final int MAX_CACHE_NORMALIZADO = 20000;
+    private static final Pattern ESPACIOS = Pattern.compile("\\s+");
+    private static final Pattern MARCAS = Pattern.compile("\\p{M}");
+
     static String normalizar(String texto) {
         if (texto == null) return "";
-        String limpio = texto.toUpperCase(Locale.ROOT).trim().replaceAll("\\s+", " ");
+        String cacheado = CACHE_NORMALIZADO.get(texto);
+        if (cacheado != null) return cacheado;
+        String limpio = ESPACIOS.matcher(texto.toUpperCase(Locale.ROOT).trim()).replaceAll(" ");
         limpio = Normalizer.normalize(limpio, Normalizer.Form.NFD);
-        return limpio.replaceAll("\\p{M}", "");
+        limpio = MARCAS.matcher(limpio).replaceAll("");
+        if (CACHE_NORMALIZADO.size() > MAX_CACHE_NORMALIZADO) CACHE_NORMALIZADO.clear();
+        CACHE_NORMALIZADO.put(texto, limpio);
+        return limpio;
+    }
+
+    /** La distancia nunca es menor que la diferencia de largos: si ni así alcanza el mínimo, no hace falta calcularla. */
+    private static boolean puedeAlcanzarMinimo(String a, String b) {
+        int max = Math.max(a.length(), b.length());
+        if (max == 0) return true;
+        return 1f - (float) Math.abs(a.length() - b.length()) / max >= SIMILITUD_MINIMA;
     }
 
     private static String[] palabras(String texto) {
@@ -186,15 +209,17 @@ public final class AlgoritmoPictosFrase {
     }
 
     private static int distanciaLevenshtein(String a, String b) {
-        int[][] dp = new int[a.length() + 1][b.length() + 1];
-        for (int i = 0; i <= a.length(); i++) dp[i][0] = i;
-        for (int j = 0; j <= b.length(); j++) dp[0][j] = j;
+        int[] previa = new int[b.length() + 1];
+        int[] actual = new int[b.length() + 1];
+        for (int j = 0; j <= b.length(); j++) previa[j] = j;
         for (int i = 1; i <= a.length(); i++) {
+            actual[0] = i;
             for (int j = 1; j <= b.length(); j++) {
                 int costo = a.charAt(i - 1) == b.charAt(j - 1) ? 0 : 1;
-                dp[i][j] = Math.min(Math.min(dp[i - 1][j] + 1, dp[i][j - 1] + 1), dp[i - 1][j - 1] + costo);
+                actual[j] = Math.min(Math.min(previa[j] + 1, actual[j - 1] + 1), previa[j - 1] + costo);
             }
+            int[] tmp = previa; previa = actual; actual = tmp;
         }
-        return dp[a.length()][b.length()];
+        return previa[b.length()];
     }
 }
